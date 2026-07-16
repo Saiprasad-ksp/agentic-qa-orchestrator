@@ -37,6 +37,10 @@ jobs:
       RUN_TARGET: local
       MAX_RUN_HISTORY: '3'
       HEADLESS: 'false'
+      GEMINI_AUTH_MODE: vertex
+      GOOGLE_CLOUD_PROJECT: alextest-6d556
+      GOOGLE_CLOUD_LOCATION: us-central1
+      GOOGLE_APPLICATION_CREDENTIALS: /Users/skaligotla/agentic-qa-credentials/service-account.json
     steps:
       - uses: actions/checkout@v4
 
