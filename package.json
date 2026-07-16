@@ -37,7 +37,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
-    "@wdio/browserstack-service": "^8.40.2",
+    "@wdio/browserstack-service": "^9.29.1",
     "pixelmatch": "^7.2.0",
     "pngjs": "^7.0.0"
   }
