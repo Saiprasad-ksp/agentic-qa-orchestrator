@@ -25,3 +25,5 @@ visual-diffs/
 
 # Local framework backups
 backup-before-*/
+# GitHub self-hosted runner runtime
+actions-runner/
