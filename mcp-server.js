@@ -81,6 +81,7 @@ async function createBrowser() {
   }
 
   return chromium.launch({
+    channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
     headless: process.env.HEADLESS !== 'false',
     slowMo: Number(process.env.PLAYWRIGHT_SLOW_MO_MS || 0),
   });

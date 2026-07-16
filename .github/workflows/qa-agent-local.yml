@@ -37,6 +37,7 @@ jobs:
       RUN_TARGET: local
       MAX_RUN_HISTORY: '3'
       HEADLESS: 'false'
+      PLAYWRIGHT_CHANNEL: chrome
       GEMINI_AUTH_MODE: vertex
       GOOGLE_CLOUD_PROJECT: alextest-6d556
       GOOGLE_CLOUD_LOCATION: us-central1
