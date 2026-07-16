@@ -1,0 +1,373 @@
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { spawnSync } = require('child_process');
+
+const projectRoot = path.resolve(__dirname, '..');
+const runtimePath = path.join(projectRoot, 'agent-hybrid-runtime.js');
+const preloadPath = path.join(projectRoot, 'src', 'discoveryModePreload.js');
+const generatedSpecsDir = path.join(projectRoot, 'generated-specs');
+const discoveryDir = path.join(projectRoot, 'reports', 'discovery');
+
+const evidenceRoots = [
+  path.join(projectRoot, 'reports'),
+  path.join(projectRoot, 'artifacts'),
+  path.join(projectRoot, 'test-results'),
+  path.join(projectRoot, 'visual-actuals'),
+  path.join(projectRoot, 'visual-diffs'),
+];
+
+function ensureDir(directory) {
+  fs.mkdirSync(directory, { recursive: true });
+}
+
+function walkFiles(root) {
+  if (!fs.existsSync(root)) {
+    return [];
+  }
+
+  const files = [];
+  const pending = [root];
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+
+    let stat;
+    try {
+      stat = fs.statSync(current);
+    } catch {
+      continue;
+    }
+
+    if (stat.isDirectory()) {
+      for (const child of fs.readdirSync(current)) {
+        pending.push(path.join(current, child));
+      }
+    } else if (stat.isFile()) {
+      files.push(current);
+    }
+  }
+
+  return files;
+}
+
+function fileHash(filePath) {
+  try {
+    return crypto
+      .createHash('sha256')
+      .update(fs.readFileSync(filePath))
+      .digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function takeSnapshot(roots) {
+  const snapshot = new Map();
+
+  for (const root of roots) {
+    for (const filePath of walkFiles(root)) {
+      let stat;
+
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        continue;
+      }
+
+      snapshot.set(filePath, {
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        hash: fileHash(filePath),
+      });
+    }
+  }
+
+  return snapshot;
+}
+
+function findChangedFiles(before, after) {
+  const changed = [];
+  const allFiles = new Set([...before.keys(), ...after.keys()]);
+
+  for (const filePath of allFiles) {
+    const previous = before.get(filePath);
+    const current = after.get(filePath);
+
+    if (
+      !previous ||
+      !current ||
+      previous.size !== current.size ||
+      previous.hash !== current.hash
+    ) {
+      changed.push(filePath);
+    }
+  }
+
+  return changed;
+}
+
+function findNewOrUpdatedFiles(before, after) {
+  const files = [];
+
+  for (const [filePath, current] of after.entries()) {
+    const previous = before.get(filePath);
+
+    if (
+      !previous ||
+      previous.size !== current.size ||
+      previous.hash !== current.hash
+    ) {
+      files.push(filePath);
+    }
+  }
+
+  return files;
+}
+
+function readJsonLines(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return [];
+  }
+
+  return fs
+    .readFileSync(filePath, 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(line => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function restoreGeneratedSpecs({
+  backupPath,
+  existedBefore,
+}) {
+  fs.rmSync(generatedSpecsDir, {
+    recursive: true,
+    force: true,
+  });
+
+  if (existedBefore && fs.existsSync(backupPath)) {
+    fs.cpSync(backupPath, generatedSpecsDir, {
+      recursive: true,
+    });
+  }
+}
+
+function main() {
+  const scenarioArgument = process.argv[2];
+
+  if (!scenarioArgument) {
+    throw new Error(
+      'Usage: npm run scenario:discover -- <scenario-file.txt>'
+    );
+  }
+
+  if (!fs.existsSync(runtimePath)) {
+    throw new Error(`Runtime file is missing: ${runtimePath}`);
+  }
+
+  if (!fs.existsSync(preloadPath)) {
+    throw new Error(`Discovery preload is missing: ${preloadPath}`);
+  }
+
+  ensureDir(discoveryDir);
+
+  const normalizedScenarioArgument = scenarioArgument
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/^scenarios\//, '');
+
+  const scenarioBase = path.basename(
+    normalizedScenarioArgument,
+    path.extname(normalizedScenarioArgument)
+  );
+
+  const startedAt = new Date().toISOString();
+  const runId = startedAt.replace(/[:.]/g, '-');
+
+  const guardLogPath = path.join(
+    discoveryDir,
+    `${scenarioBase}.${runId}.guard.jsonl`
+  );
+
+  const manifestPath = path.join(
+    discoveryDir,
+    `${scenarioBase}.manifest.json`
+  );
+
+  const temporaryBackupRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'gemini-qa-discovery-')
+  );
+
+  const generatedSpecsBackup = path.join(
+    temporaryBackupRoot,
+    'generated-specs'
+  );
+
+  const generatedSpecsExisted = fs.existsSync(generatedSpecsDir);
+
+  if (generatedSpecsExisted) {
+    fs.cpSync(generatedSpecsDir, generatedSpecsBackup, {
+      recursive: true,
+    });
+  }
+
+  const generatedBefore = takeSnapshot([generatedSpecsDir]);
+  const evidenceBefore = takeSnapshot(evidenceRoots);
+
+  console.log('');
+  console.log('🔎 DISCOVERY MODE');
+  console.log('• Executing the .txt scenario locally.');
+  console.log('• Spec-writing tools are hidden from Gemini.');
+  console.log('• Writes into generated-specs are blocked.');
+  console.log('• No spec will be published by this command.');
+  console.log('');
+
+  const child = spawnSync(
+    process.execPath,
+    [
+      '-r',
+      preloadPath,
+      runtimePath,
+      normalizedScenarioArgument,
+    ],
+    {
+      cwd: projectRoot,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        AGENT_RUN_MODE: 'discover',
+        AUTO_SAVE_SPEC: 'false',
+        AUTO_RUN_GENERATED_SPEC: 'false',
+        DISABLE_SPEC_GENERATION: 'true',
+        DISCOVERY_GUARD_LOG: guardLogPath,
+      },
+    }
+  );
+
+  const generatedAfter = takeSnapshot([generatedSpecsDir]);
+
+  const attemptedSpecChanges = findChangedFiles(
+    generatedBefore,
+    generatedAfter
+  );
+
+  if (attemptedSpecChanges.length > 0) {
+    restoreGeneratedSpecs({
+      backupPath: generatedSpecsBackup,
+      existedBefore: generatedSpecsExisted,
+    });
+  }
+
+  const evidenceAfter = takeSnapshot(evidenceRoots);
+
+  const evidenceFiles = findNewOrUpdatedFiles(
+    evidenceBefore,
+    evidenceAfter
+  ).filter(filePath => {
+    return filePath !== guardLogPath && filePath !== manifestPath;
+  });
+
+  const guardEvents = readJsonLines(guardLogPath);
+
+  const blockedSpecWrites = guardEvents.filter(
+    event => event.type === 'blocked_write'
+  );
+
+  const strippedToolDeclarations = guardEvents.filter(
+    event => event.type === 'stripped_tool_declarations'
+  );
+
+  const status =
+    typeof child.status === 'number'
+      ? child.status
+      : 1;
+
+  const manifest = {
+    version: 1,
+    mode: 'discover',
+    scenarioArgument,
+    scenarioBase,
+    runId,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    status,
+    signal: child.signal || null,
+    spawnError: child.error?.message || null,
+
+    evidenceFiles,
+
+    screenshotFiles: evidenceFiles.filter(filePath =>
+      /\.(png|jpg|jpeg|webp)$/i.test(filePath)
+    ),
+
+    structuredEvidenceFiles: evidenceFiles.filter(filePath =>
+      /\.(json|jsonl|md|txt|html)$/i.test(filePath)
+    ),
+
+    strippedToolDeclarations,
+    blockedSpecWrites,
+    attemptedSpecChanges,
+
+    generatedSpecsRestored:
+      attemptedSpecChanges.length > 0,
+  };
+
+  fs.writeFileSync(
+    manifestPath,
+    JSON.stringify(manifest, null, 2),
+    'utf8'
+  );
+
+  fs.rmSync(temporaryBackupRoot, {
+    recursive: true,
+    force: true,
+  });
+
+  console.log('');
+  console.log(`📋 Discovery manifest: ${manifestPath}`);
+  console.log(`📎 Evidence files: ${evidenceFiles.length}`);
+  console.log(`📷 Screenshots: ${manifest.screenshotFiles.length}`);
+  console.log(
+    `🧰 Spec-writing declarations removed: ${strippedToolDeclarations.length}`
+  );
+
+  if (attemptedSpecChanges.length > 0) {
+    console.log(
+      '🛡️ A generated-spec change was attempted and the previous files were restored.'
+    );
+  } else {
+    console.log('🚫 No generated spec was created or modified.');
+  }
+
+  if (status === 0) {
+    console.log('');
+    console.log('Next command:');
+    console.log(
+      `npm run spec:generate:from-last-run -- ${scenarioArgument}`
+    );
+  } else {
+    console.log('');
+    console.log(`❌ Discovery failed with exit status ${status}.`);
+    console.log('Spec generation must not be run for this discovery.');
+  }
+
+  process.exit(status);
+}
+
+try {
+  main();
+} catch (error) {
+  console.error(error.stack || error.message);
+  process.exit(1);
+}

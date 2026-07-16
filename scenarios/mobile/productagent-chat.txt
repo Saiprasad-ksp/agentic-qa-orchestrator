@@ -1,0 +1,11 @@
+PLATFORM: Mobile
+SCENARIO: Virtual Support Agent Engagement Experience
+GOAL: Launch the application, clear out standard initial launch screens to find the help dashboard, open the live conversational chat interface, and interact with the automated assistant naturally to test both basic product Q&A and human agent escalation.
+
+HUMAN BEHAVIORAL DIRECTIVES:
+- Open the application and navigate past the environment and guest selection options as an end-user would.
+- Scan the dashboard for a direct way to message support or check active chat channels.
+- Start a conversation by querying about product dietary alternatives (such as gluten-free stock availability). 
+- Use 'verify_generative_response' to dynamically judge if the assistant's reply feels natural and accurate.
+- If the assistant struggles or asks for too much specific filtering criteria, explicitly request to speak to a real team member to test the transfer flow.
+- Audit the final transfer layout page using 'verify_generative_response', then save the functional automation routine via 'save_spec_file'.

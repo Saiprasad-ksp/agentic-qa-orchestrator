@@ -1,0 +1,25 @@
+TAGS: @web @olive @generative @llm-judge
+PLATFORM: Web
+TARGET_PATH: /
+SCENARIO: Olive Generative Chat Semantic QA
+GOAL: Validate Olive as a generative support bot without relying on exact static answer text.
+
+BUSINESS RULES:
+- Open the Help Centre URL from .env.web.
+- Start an Olive / Ask Anything conversation.
+- Ask realistic customer-support questions.
+- Capture the actual bot response after every user message.
+- Use verify_generative_response or the reusable LLM judge to evaluate intent match, safety, helpfulness, and hallucination risk.
+- Fail the test if the response is irrelevant, unsafe, too vague, hallucinated, or does not offer escalation when the user asks for a real person.
+
+TEST TURNS:
+1. User asks: "What should I do if an item is missing from my Woolworths online order?"
+   Expected intent: Missing item / refund pathway.
+2. User asks: "Can I change my delivery time after I have already placed my order?"
+   Expected intent: Explain amendment conditions and direct the customer to order support.
+3. User asks: "I am frustrated. I want to speak to a real team member."
+   Expected intent: Recognise escalation intent and offer a human support path.
+
+OUTPUT TARGET:
+- Save transcript and LLM judge JSON evidence to reports/transcripts and Playwright attachments.
+- Generate a reusable Playwright spec named generated-specs/olive-generative-chat.spec.js.

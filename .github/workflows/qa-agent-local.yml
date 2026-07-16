@@ -1,0 +1,79 @@
+name: QA agent local runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario_filename:
+        description: Scenario filename ending in .txt
+        required: true
+        type: string
+      scenario_content:
+        description: Complete business scenario content
+        required: true
+        type: string
+      target_env:
+        description: Target environment
+        required: true
+        default: UAT
+        type: choice
+        options: [UAT, PROD]
+      mobile_platform:
+        description: Mobile platform when PLATFORM is mobile
+        required: false
+        default: android
+        type: choice
+        options: [android, ios]
+
+jobs:
+  execute:
+    runs-on: [self-hosted, macOS, qa-agent]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    env:
+      TARGET_ENV: ${{ inputs.target_env }}
+      MOBILE_PLATFORM: ${{ inputs.mobile_platform }}
+      RUN_TARGET: local
+      MAX_RUN_HISTORY: '3'
+      HEADLESS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate filename
+        shell: bash
+        env:
+          SCENARIO_FILENAME: ${{ inputs.scenario_filename }}
+        run: |
+          [[ "$SCENARIO_FILENAME" =~ ^[A-Za-z0-9._-]+\.txt$ ]] || exit 1
+
+      - name: Create scenario
+        shell: bash
+        env:
+          SCENARIO_FILENAME: ${{ inputs.scenario_filename }}
+          SCENARIO_CONTENT: ${{ inputs.scenario_content }}
+        run: |
+          mkdir -p scenarios/incoming
+          printf '%s\n' "$SCENARIO_CONTENT" > "scenarios/incoming/$SCENARIO_FILENAME"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate framework
+        run: npm run check
+
+      - name: Discover, generate, execute and report
+        run: npm run scenario:build-and-run -- "scenarios/incoming/${{ inputs.scenario_filename }}"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-evidence-${{ github.run_id }}
+          path: |
+            artifacts/runs/
+            reports/shareable/
+            generated-specs/
+            test-results/
+            playwright-report/
+          retention-days: 14

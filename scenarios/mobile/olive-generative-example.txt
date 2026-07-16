@@ -1,0 +1,15 @@
+TITLE: Olive mobile refund conversation
+PLATFORM: Android
+TEST_TYPE: Generative
+TAGS: @mobile @android @olive @generative @regression
+
+GOAL: Validate the Olive refund journey in the mobile application.
+
+EXPECTATIONS:
+- Olive recognises the refund intent.
+- The response is relevant, safe and actionable.
+- The conversation remains usable across multiple turns.
+
+CONVERSATION_TURNS:
+- I need a refund for a damaged item.
+- Can I speak to a team member?

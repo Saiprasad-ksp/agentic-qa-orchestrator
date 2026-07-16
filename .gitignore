@@ -1,0 +1,27 @@
+node_modules/
+.git/
+.DS_Store
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*service-account*.json
+storage-state*.json
+.auth/
+artifacts/runs/
+reports/
+test-results/
+playwright-report/
+allure-results/
+allure-report/
+visual-actuals/
+visual-diffs/
+*.log
+*.zip
+*.webm
+*.mp4
+
+# Local framework backups
+backup-before-*/

@@ -1,0 +1,44 @@
+{
+  "name": "agentic-qa-orchestrator",
+  "version": "2.0.0",
+  "main": "agent-hybrid-client.js",
+  "scripts": {
+    "scenario:discover": "AGENT_RUN_MODE=discover node scripts/run-discovery.js",
+    "scenario:build": "node scripts/run-scenario-lifecycle.js",
+    "scenario:build-and-run": "RUN_GENERATED_SPEC=true BUILD_SHAREABLE_REPORT=true OPEN_REPORT=true node scripts/run-scenario-lifecycle.js",
+    "spec:generate": "AGENT_RUN_MODE=generate node scripts/generate-spec-from-last-run.js",
+    "spec:validate": "node scripts/validate-generated-spec.js",
+    "test:web": "npx playwright test generated-specs/web --project=chromium",
+    "test:web:regression": "npx playwright test generated-specs/web --project=chromium --grep @regression",
+    "test:mobile": "npx wdio run wdio.conf.js",
+    "test:mobile:android": "MOBILE_PLATFORM=android npx wdio run wdio.conf.js",
+    "test:mobile:ios": "MOBILE_PLATFORM=ios npx wdio run wdio.conf.js",
+    "cleanup:runs": "node scripts/cleanup-run-history.js",
+    "report:build": "node scripts/build-shareable-report.js qa-report",
+    "report:open": "open reports/shareable/qa-report.html",
+    "mcp:web": "node mcp-server.js",
+    "mcp:mobile": "node mcp-mobile-server.js",
+    "mcp:qa": "node mcp/qa-framework-mcp.js",
+    "check": "node scripts/check-project.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Business-intent QA orchestration for Playwright, Appium/WebdriverIO, generative Olive validation, self-healing and evidence reporting.",
+  "dependencies": {
+    "@google/genai": "^2.11.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@wdio/cli": "^9.29.1",
+    "@wdio/local-runner": "^9.29.1",
+    "@wdio/mocha-framework": "^7.7.3",
+    "@wdio/spec-reporter": "^9.29.1",
+    "playwright": "^1.61.1",
+    "webdriverio": "^9.29.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@wdio/browserstack-service": "^8.40.2",
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0"
+  }
+}

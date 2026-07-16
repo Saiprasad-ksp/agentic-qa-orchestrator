@@ -1,0 +1,45 @@
+cd "/Users/skaligotla/gemini-qa-agent 2"
+
+cat > scenarios/web-helpcenter-faq-audit.txt <<'EOF'
+TAGS: @web @faq @helpcenter @visual @linkcheck @exploratory @regression
+PLATFORM: Web
+TARGET_PATH: /shop/help
+PAGE: Help Centre
+SCENARIO: Check Woolworths Help Centre FAQ page
+
+GOAL:
+Check that the Help Centre page opens correctly, looks right, supports customer FAQ journeys, and provides useful support options.
+
+EXPECTATION:
+The page should visually match the approved baseline for the selected environment.
+Important links and buttons should work.
+Screenshots and evidence should be added to the report.
+
+CUSTOMER JOURNEYS TO CHECK:
+Ask a few realistic Woolworths retail customer questions in the Help Centre FAQ input at the top of the page.
+
+Click the suggested FAQ prompts one by one and confirm that useful responses are generated.
+
+For generated FAQ responses, open the source or article link when available, navigate to the article page, expand the article where possible, and provide a positive rating.
+
+Check the order support area.
+If the customer is not logged in, the page should show a login banner for help with orders.
+If the customer is logged in, the page should show recent orders or an order carousel.
+
+Explore the Browse topics section.
+Open at least two topics.
+Open at least two articles from those topics.
+Provide a negative rating where available and enter the feedback text "DSS QA".
+
+Open the Feedback topic.
+Open the feedback article.
+Open the customer feedback form.
+Fill the form with random safe test data and enter "DSS QA" in the message field.
+Submit the form only in UAT.
+
+Check the Contact us section.
+On the Woolworths tab, click Chat with Olive or Chat now and confirm that the Olive widget launches.
+Check Message us on the app and click See more to confirm that the app landing page opens.
+
+Take screenshots for each important page, answer, article, rating, form, and contact option.
+EOF

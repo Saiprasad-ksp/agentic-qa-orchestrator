@@ -1,0 +1,23 @@
+TAGS: @mobile @faq @helpcenter @visual @linkcheck @browserstack
+PLATFORM: Mobile
+SCENARIO: Woolworths App More Menu FAQ Visual and Interaction Audit
+
+GOAL:
+Open the Woolworths app on BrowserStack, navigate to More menu -> FAQ / Help Centre, capture screenshots, and audit visible controls.
+
+BUSINESS RULES:
+- Use Appium MCP mobile tools only.
+- Do not use Playwright web tools for this scenario.
+- Start the mobile app session.
+- Navigate to More menu.
+- Open FAQ or Help Centre.
+- Capture a screenshot of the FAQ page.
+- Read all visible text and controls.
+- Check that visible buttons and links are present and actionable where possible.
+- Save screenshot and screen text into reports.
+- Add screenshots to the HTML report.
+
+EXPECTED OUTPUT:
+- HTML report should contain mobile screenshots.
+- HTML report should contain visible text and control audit evidence.
+- Scenario should fail if FAQ/Help Centre cannot be reached.
