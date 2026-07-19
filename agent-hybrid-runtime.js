@@ -551,10 +551,25 @@ The generated Help Centre spec must:
         toolOutput = `Spec file written to ${targetSpecPath}`;
         console.log(`💾 ${toolOutput}`);
       } else {
-        const mcpResult = await mcpClient.callTool({
-          name: functionCall.name,
-          arguments: functionCall.args || {},
-        });
+        const mcpToolTimeoutMs = Number(
+          process.env.MCP_TOOL_TIMEOUT_MS || 60000
+        );
+
+        console.log(
+          `⏱️ MCP timeout for ${functionCall.name}: ` +
+          `${mcpToolTimeoutMs}ms`
+        );
+
+        const mcpResult = await mcpClient.callTool(
+          {
+            name: functionCall.name,
+            arguments: functionCall.args || {},
+          },
+          undefined,
+          {
+            timeout: mcpToolTimeoutMs,
+          }
+        );
 
         toolOutput = getToolText(mcpResult);
         isError = Boolean(mcpResult.isError);

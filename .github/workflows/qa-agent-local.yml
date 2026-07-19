@@ -79,6 +79,9 @@ jobs:
       OLIVE_SURFACE_TIMEOUT_MS: '20000'
       OLIVE_INITIAL_GREETING_TIMEOUT_MS: '45000'
 
+      # Longer MCP calls are allowed only in this runner workflow.
+      MCP_TOOL_TIMEOUT_MS: '180000'
+
       GEMINI_AUTH_MODE: vertex
       GOOGLE_CLOUD_PROJECT: alextest-6d556
       GOOGLE_CLOUD_LOCATION: us-central1
