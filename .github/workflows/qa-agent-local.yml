@@ -38,9 +38,22 @@ on:
           - UAT
           - PROD
 
+      mobile_platform:
+        description: Mobile platform when PLATFORM is mobile
+        required: false
+        default: android
+        type: choice
+        options:
+          - android
+          - ios
+
 jobs:
   execute:
-    runs-on: [self-hosted, macOS, qa-agent]
+    runs-on:
+      - self-hosted
+      - macOS
+      - qa-agent
+
     timeout-minutes: 120
 
     permissions:
@@ -49,18 +62,22 @@ jobs:
 
     env:
       TARGET_ENV: ${{ inputs.target_env }}
+      MOBILE_PLATFORM: ${{ inputs.mobile_platform }}
       RUN_TARGET: local
       MAX_RUN_HISTORY: '3'
+
       HEADLESS: 'false'
       PLAYWRIGHT_CHANNEL: chrome
 
-      # Olive can initialise more slowly in a fresh runner browser profile.
+      WEB_BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
+      BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
+
+      URL_PROD: https://www.woolworths.com.au
+      URL_UAT: https://uatsite.woolworths.com.au
+
       OLIVE_OPEN_TIMEOUT_MS: '120000'
       OLIVE_SURFACE_TIMEOUT_MS: '20000'
       OLIVE_INITIAL_GREETING_TIMEOUT_MS: '45000'
-
-      WEB_BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
-      BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
 
       GEMINI_AUTH_MODE: vertex
       GOOGLE_CLOUD_PROJECT: alextest-6d556
@@ -71,7 +88,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate inputs
+      - name: Validate workflow inputs
         shell: bash
         env:
           RUN_MODE: ${{ inputs.run_mode }}
@@ -81,27 +98,40 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "$RUN_MODE" == "scenario" ]]; then
-            [[ "$SCENARIO_FILENAME" =~ ^[A-Za-z0-9._-]+\.txt$ ]] || {
-              echo "Invalid scenario filename: $SCENARIO_FILENAME"
-              exit 1
-            }
-
-            [[ -n "$SCENARIO_CONTENT" ]] || {
-              echo "scenario_content is required for scenario mode"
-              exit 1
-            }
-          fi
-
-          if [[ "$RUN_MODE" == "spec" ]]; then
-            case "$SPEC_PATH" in
-              generated-specs/web/*.spec.js) ;;
-              *)
-                echo "Invalid spec path: $SPEC_PATH"
+          case "$RUN_MODE" in
+            scenario)
+              [[ "$SCENARIO_FILENAME" =~ ^[A-Za-z0-9._-]+\.txt$ ]] || {
+                echo "Invalid scenario filename: $SCENARIO_FILENAME"
                 exit 1
-                ;;
-            esac
-          fi
+              }
+
+              [[ -n "$SCENARIO_CONTENT" ]] || {
+                echo "scenario_content is required in scenario mode"
+                exit 1
+              }
+              ;;
+
+            spec)
+              [[ -n "$SPEC_PATH" ]] || {
+                echo "spec_path is required in spec mode"
+                exit 1
+              }
+
+              case "$SPEC_PATH" in
+                generated-specs/*.spec.js | generated-specs/**/*.spec.js)
+                  ;;
+                *)
+                  echo "Invalid spec path: $SPEC_PATH"
+                  exit 1
+                  ;;
+              esac
+              ;;
+
+            *)
+              echo "Unsupported run_mode: $RUN_MODE"
+              exit 1
+              ;;
+          esac
 
       - name: Create incoming scenario
         if: inputs.run_mode == 'scenario'
@@ -110,9 +140,15 @@ jobs:
           SCENARIO_FILENAME: ${{ inputs.scenario_filename }}
           SCENARIO_CONTENT: ${{ inputs.scenario_content }}
         run: |
+          set -euo pipefail
+
           mkdir -p scenarios/incoming
+
           printf '%s\n' "$SCENARIO_CONTENT" \
             > "scenarios/incoming/$SCENARIO_FILENAME"
+
+          sed -n '1,80p' \
+            "scenarios/incoming/$SCENARIO_FILENAME"
 
       - name: Install dependencies
         run: npm ci
@@ -126,14 +162,18 @@ jobs:
           npm run scenario:build-and-run -- \
             "scenarios/incoming/${{ inputs.scenario_filename }}"
 
-      - name: Validate generated spec
+      - name: Confirm generated spec exists
         if: inputs.run_mode == 'spec'
+        shell: bash
         run: |
           test -f "${{ inputs.spec_path }}" || {
             echo "Spec not found: ${{ inputs.spec_path }}"
             exit 1
           }
 
+      - name: Validate generated spec
+        if: inputs.run_mode == 'spec'
+        run: |
           node scripts/validate-generated-spec.js \
             "${{ inputs.spec_path }}"
 
@@ -145,7 +185,89 @@ jobs:
             --project=chromium \
             --headed
 
-      - name: Upload evidence
+      - name: Prepare shareable report
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p reports/shareable
+
+          REPORT_SCRIPT="$(
+            node - <<'NODE'
+          const pkg = require('./package.json');
+          const scripts = pkg.scripts || {};
+
+          const preferred = [
+            'report:shareable',
+            'report:generate',
+            'report:build',
+            'generate:report',
+            'generate-report'
+          ];
+
+          const selected = preferred.find(name => scripts[name]);
+
+          if (selected) {
+            process.stdout.write(selected);
+          }
+          NODE
+          )"
+
+          if [[ -n "$REPORT_SCRIPT" ]]; then
+            echo "Running npm run $REPORT_SCRIPT"
+            npm run "$REPORT_SCRIPT" || true
+          fi
+
+          if [[ -d "playwright-report" ]]; then
+            rm -rf reports/shareable/playwright-report
+            mkdir -p reports/shareable/playwright-report
+
+            cp -R playwright-report/. \
+              reports/shareable/playwright-report/
+          fi
+
+          if [[ -d "test-results" ]]; then
+            rm -rf reports/shareable/test-results
+            mkdir -p reports/shareable/test-results
+
+            cp -R test-results/. \
+              reports/shareable/test-results/
+          fi
+
+          if [[ -d "reports/screenshots" ]]; then
+            rm -rf reports/shareable/screenshots
+            mkdir -p reports/shareable/screenshots
+
+            cp -R reports/screenshots/. \
+              reports/shareable/screenshots/
+          fi
+
+          if [[ -d "reports/transcripts" ]]; then
+            rm -rf reports/shareable/transcripts
+            mkdir -p reports/shareable/transcripts
+
+            cp -R reports/transcripts/. \
+              reports/shareable/transcripts/
+          fi
+
+          if [[ -d "reports/audits" ]]; then
+            rm -rf reports/shareable/audits
+            mkdir -p reports/shareable/audits
+
+            cp -R reports/audits/. \
+              reports/shareable/audits/
+          fi
+
+          find reports/shareable \
+            -maxdepth 4 \
+            -type f \
+            -print \
+            2>/dev/null | head -100
+
+          exit 0
+
+      - name: Upload QA evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -157,6 +279,7 @@ jobs:
             test-results/
             playwright-report/
             visual-actuals/
+            visual-baselines/
             visual-diffs/
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
