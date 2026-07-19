@@ -25,14 +25,21 @@ function validateGeneratedSpec(filePath, options = {}) {
     );
   }
 
-  if (
-    platform === 'web' &&
-    !/readEnv\s*\(\s*['"]WEB_BASE_URL['"]\s*\)/.test(code) &&
-    !/readEnv\s*\(\s*['"]BASE_URL['"]\s*\)/.test(code)
-  ) {
-    errors.push(
-      'Web spec must resolve WEB_BASE_URL or BASE_URL through readEnv.'
-    );
+  if (platform === 'web') {
+    const resolvesSupportedWebUrl =
+      /readEnv\s*\(\s*['"]WEB_BASE_URL['"]/.test(code) ||
+      /readEnv\s*\(\s*['"]BASE_URL['"]/.test(code) ||
+      (
+        /readEnv\s*\(\s*['"]URL_PROD['"]/.test(code) &&
+        /readEnv\s*\(\s*['"]URL_UAT['"]/.test(code)
+      ) ||
+      /readEnv\s*\(\s*['"]HELP_CENTER_WEB_URL['"]/.test(code);
+
+    if (!resolvesSupportedWebUrl) {
+      errors.push(
+        'Web spec must resolve its URL through a supported readEnv configuration.'
+      );
+    }
   }
 
   if (
