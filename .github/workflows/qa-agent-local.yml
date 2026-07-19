@@ -33,11 +33,14 @@ jobs:
       actions: read
     env:
       TARGET_ENV: ${{ inputs.target_env }}
-      MOBILE_PLATFORM: ${{ inputs.mobile_platform }}
       RUN_TARGET: local
       MAX_RUN_HISTORY: '3'
       HEADLESS: 'false'
       PLAYWRIGHT_CHANNEL: chrome
+
+      WEB_BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
+      BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
+
       GEMINI_AUTH_MODE: vertex
       GOOGLE_CLOUD_PROJECT: alextest-6d556
       GOOGLE_CLOUD_LOCATION: us-central1
