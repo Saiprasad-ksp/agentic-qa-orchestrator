@@ -63,16 +63,6 @@ on:
           - android
           - ios
 
-      browserstack_target_type:
-        description: BrowserStack launch type
-        required: false
-        default: desktop-web
-        type: choice
-        options:
-          - desktop-web
-          - mobile-web
-          - native-app
-
       browserstack_browser:
         description: BrowserStack web browser
         required: false
@@ -114,42 +104,6 @@ on:
           - 1280x720
           - 1440x900
           - 1920x1080
-
-      browserstack_device:
-        description: BrowserStack real mobile device
-        required: false
-        default: Samsung Galaxy S24
-        type: string
-
-      browserstack_mobile_os_version:
-        description: BrowserStack mobile operating-system version
-        required: false
-        default: '14.0'
-        type: string
-
-      browserstack_mobile_browser:
-        description: Mobile browser for mobile-web execution
-        required: false
-        default: chrome
-        type: choice
-        options:
-          - chrome
-          - safari
-
-      browserstack_device_orientation:
-        description: BrowserStack mobile-device orientation
-        required: false
-        default: portrait
-        type: choice
-        options:
-          - portrait
-          - landscape
-
-      browserstack_real_mobile:
-        description: Use a BrowserStack real mobile device
-        required: false
-        default: true
-        type: boolean
 
       browserstack_local:
         description: Use BrowserStack Local tunnel
@@ -198,17 +152,11 @@ jobs:
       HEADLESS: 'true'
       MCP_SERVER_MODE: local
 
-      BROWSERSTACK_TARGET_TYPE: ${{ inputs.browserstack_target_type }}
       BROWSERSTACK_BROWSER: ${{ inputs.browserstack_browser }}
       BROWSERSTACK_BROWSER_VERSION: ${{ inputs.browserstack_browser_version }}
       BROWSERSTACK_OS: ${{ inputs.browserstack_os }}
       BROWSERSTACK_OS_VERSION: ${{ inputs.browserstack_os_version }}
       BROWSERSTACK_RESOLUTION: ${{ inputs.browserstack_resolution }}
-      BROWSERSTACK_DEVICE: ${{ inputs.browserstack_device }}
-      BROWSERSTACK_MOBILE_OS_VERSION: ${{ inputs.browserstack_mobile_os_version }}
-      BROWSERSTACK_MOBILE_BROWSER: ${{ inputs.browserstack_mobile_browser }}
-      BROWSERSTACK_DEVICE_ORIENTATION: ${{ inputs.browserstack_device_orientation }}
-      BROWSERSTACK_REAL_MOBILE: ${{ inputs.browserstack_real_mobile }}
       BROWSERSTACK_LOCAL: ${{ inputs.browserstack_local }}
 
       AGENTIC_QA_CREDENTIALS_DIR: ${{ github.workspace }}/.credentials
@@ -250,17 +198,11 @@ jobs:
           echo "Mobile platform: ${{ inputs.mobile_platform }}"
 
           if [[ "${{ inputs.run_target }}" == "browserstack" ]]; then
-            echo "BrowserStack target type: ${{ inputs.browserstack_target_type }}"
             echo "BrowserStack browser: ${{ inputs.browserstack_browser }}"
             echo "BrowserStack browser version: ${{ inputs.browserstack_browser_version }}"
             echo "BrowserStack OS: ${{ inputs.browserstack_os }}"
             echo "BrowserStack OS version: ${{ inputs.browserstack_os_version }}"
             echo "BrowserStack resolution: ${{ inputs.browserstack_resolution }}"
-            echo "BrowserStack device: ${{ inputs.browserstack_device }}"
-            echo "BrowserStack mobile OS version: ${{ inputs.browserstack_mobile_os_version }}"
-            echo "BrowserStack mobile browser: ${{ inputs.browserstack_mobile_browser }}"
-            echo "BrowserStack orientation: ${{ inputs.browserstack_device_orientation }}"
-            echo "BrowserStack real mobile: ${{ inputs.browserstack_real_mobile }}"
             echo "BrowserStack Local: ${{ inputs.browserstack_local }}"
           fi
 
@@ -342,68 +284,6 @@ jobs:
           } >> "$GITHUB_ENV"
 
           echo "Scenario created: $SCENARIO_PATH"
-
-
-      - name: Validate BrowserStack configuration
-        if: ${{ inputs.run_target == 'browserstack' }}
-        run: |
-          set -euo pipefail
-
-          case "$BROWSERSTACK_TARGET_TYPE" in
-            desktop-web|mobile-web|native-app)
-              ;;
-            *)
-              echo "::error::Unsupported BrowserStack target type: $BROWSERSTACK_TARGET_TYPE"
-              exit 1
-              ;;
-          esac
-
-          if [[ "$BROWSERSTACK_TARGET_TYPE" == "desktop-web" ]]; then
-            if [[ -z "$BROWSERSTACK_BROWSER" ]]; then
-              echo "::error::BrowserStack browser is required for desktop-web."
-              exit 1
-            fi
-
-            if [[ -z "$BROWSERSTACK_OS" ]]; then
-              echo "::error::BrowserStack OS is required for desktop-web."
-              exit 1
-            fi
-          fi
-
-          if [[ "$BROWSERSTACK_TARGET_TYPE" == "mobile-web" ||                 "$BROWSERSTACK_TARGET_TYPE" == "native-app" ]]; then
-            if [[ -z "$BROWSERSTACK_DEVICE" ]]; then
-              echo "::error::BrowserStack device is required for mobile execution."
-              exit 1
-            fi
-
-            if [[ -z "$BROWSERSTACK_MOBILE_OS_VERSION" ]]; then
-              echo "::error::BrowserStack mobile OS version is required."
-              exit 1
-            fi
-
-            case "$BROWSERSTACK_DEVICE_ORIENTATION" in
-              portrait|landscape)
-                ;;
-              *)
-                echo "::error::Unsupported device orientation: $BROWSERSTACK_DEVICE_ORIENTATION"
-                exit 1
-                ;;
-            esac
-          fi
-
-          if [[ "$BROWSERSTACK_TARGET_TYPE" == "mobile-web" ]]; then
-            if [[ "$MOBILE_PLATFORM" == "android" &&                   "$BROWSERSTACK_MOBILE_BROWSER" != "chrome" ]]; then
-              echo "::error::Android mobile-web execution must use Chrome."
-              exit 1
-            fi
-
-            if [[ "$MOBILE_PLATFORM" == "ios" &&                   "$BROWSERSTACK_MOBILE_BROWSER" != "safari" ]]; then
-              echo "::error::iOS mobile-web execution must use Safari."
-              exit 1
-            fi
-          fi
-
-          echo "BrowserStack configuration is valid."
 
       - name: Load BrowserStack credentials
         if: ${{ inputs.run_target == 'browserstack' }}
