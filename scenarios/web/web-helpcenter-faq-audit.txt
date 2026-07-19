@@ -1,6 +1,3 @@
-cd "/Users/skaligotla/gemini-qa-agent 2"
-
-cat > scenarios/web-helpcenter-faq-audit.txt <<'EOF'
 TAGS: @web @faq @helpcenter @visual @linkcheck @exploratory @regression
 PLATFORM: Web
 TARGET_PATH: /shop/help
@@ -42,4 +39,3 @@ On the Woolworths tab, click Chat with Olive or Chat now and confirm that the Ol
 Check Message us on the app and click See more to confirm that the app landing page opens.
 
 Take screenshots for each important page, answer, article, rating, form, and contact option.
-EOF
