@@ -177,6 +177,33 @@ class OliveWebBot {
     while (Date.now() < deadline) {
       attempt += 1;
 
+      console.log(
+        `[Olive] Open attempt ${attempt}; ` +
+        `URL=${this.page.url()}; ` +
+        `frames=${this.page.frames().length}`
+      );
+
+      /*
+       * A previous click may have started the widget asynchronously.
+       * Detect that surface before clicking the launcher again.
+       */
+      const appearedSurface =
+        await this.findChatSurface({
+          timeout: 1500,
+        });
+
+      if (appearedSurface) {
+        console.log(
+          '[Olive] Existing chat surface detected.'
+        );
+
+        await this.waitUntilReady(
+          appearedSurface
+        );
+
+        return appearedSurface;
+      }
+
       const direct =
         await this.tryClickKnownChatTriggers(
           `direct-${attempt}`
@@ -253,89 +280,160 @@ class OliveWebBot {
     const patterns =
       /chat\s*now|chat\s*with\s*olive|ask\s*olive|ask\s*anything|message\s*us|start\s*chat|live\s*chat|online\s*chat|customer\s*support|get\s*help/i;
 
+    /*
+     * The Woolworths homepage can contain hidden SSR/Angular copies of
+     * the Olive launcher. Do not use `.first()` before filtering by
+     * visibility because it can select the hidden copy.
+     */
     const candidates = [
-      () =>
-        this.page
-          .getByRole('button', {
-            name: patterns,
-          })
-          .first(),
+      this.page.locator(
+        'button.olive-chat-link:visible'
+      ),
 
-      () =>
-        this.page
-          .getByRole('link', {
-            name: patterns,
-          })
-          .first(),
+      this.page.locator(
+        'shared-olive-chat-button ' +
+        'button:visible'
+      ),
 
-      () =>
-        this.page
-          .locator(
-            'button, a, [role="button"]'
-          )
-          .filter({
-            hasText: patterns,
-          })
-          .first(),
+      this.page.locator([
+        'button[aria-label="Chat with Olive"]:visible',
+        'button[aria-label*="olive" i]:visible',
+        'button[title*="olive" i]:visible',
+        '[role="button"][aria-label*="olive" i]:visible',
+        '[data-testid*="olive" i]:visible',
+      ].join(',')),
 
-      () =>
-        this.page
-          .locator([
-            'button[aria-label*="chat" i]',
-            'button[aria-label*="olive" i]',
-            'button[title*="chat" i]',
-            'button[title*="olive" i]',
-            '[role="button"][aria-label*="chat" i]',
-            '[role="button"][aria-label*="olive" i]',
-            '[data-testid*="chat" i]',
-            '[data-testid*="olive" i]',
-            '[id*="chat" i]',
-            '[id*="olive" i]',
-          ].join(','))
-          .first(),
+      this.page.getByRole('button', {
+        name: patterns,
+      }),
+
+      this.page.getByRole('link', {
+        name: patterns,
+      }),
+
+      this.page
+        .locator(
+          'button:visible, ' +
+          'a:visible, ' +
+          '[role="button"]:visible'
+        )
+        .filter({
+          hasText: patterns,
+        }),
     ];
 
-    for (const makeLocator of candidates) {
-      const locator = makeLocator();
+    const surfaceTimeout = Number(
+      process.env.OLIVE_SURFACE_TIMEOUT_MS ||
+      6000
+    );
 
-      if (!(await visible(locator, 800))) {
-        continue;
-      }
+    for (const candidateGroup of candidates) {
+      const count = Math.min(
+        await candidateGroup.count().catch(() => 0),
+        20
+      );
 
-      await locator
-        .scrollIntoViewIfNeeded()
-        .catch(() => {});
+      for (let index = 0; index < count; index += 1) {
+        const locator = candidateGroup.nth(index);
 
-      await locator
-        .click({
-          timeout: 7000,
-        })
-        .catch(async () => {
-          await locator
-            .click({
+        if (!(await visible(locator, 1000))) {
+          continue;
+        }
+
+        const description = await locator
+          .evaluate(element => ({
+            tag: element.tagName,
+            text: String(
+              element.innerText ||
+              element.textContent ||
+              ''
+            )
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 150),
+            ariaLabel:
+              element.getAttribute('aria-label') ||
+              '',
+            className:
+              typeof element.className === 'string'
+                ? element.className
+                : '',
+          }))
+          .catch(() => null);
+
+        console.log(
+          `[Olive] Trigger candidate ${label}: ` +
+          `${JSON.stringify(description)}`
+        );
+
+        await locator
+          .scrollIntoViewIfNeeded()
+          .catch(() => {});
+
+        let clicked = false;
+
+        try {
+          await locator.click({
+            timeout: 7000,
+          });
+
+          clicked = true;
+        } catch (normalClickError) {
+          console.log(
+            `[Olive] Normal click failed: ` +
+            `${normalClickError.message}`
+          );
+
+          try {
+            await locator.click({
               timeout: 7000,
               force: true,
-            })
-            .catch(() => {});
-        });
+            });
 
-      await this.page.waitForTimeout(1200);
+            clicked = true;
+          } catch (forceClickError) {
+            console.log(
+              `[Olive] Force click failed: ` +
+              `${forceClickError.message}`
+            );
+          }
+        }
 
-      const surface =
-        await this.findChatSurface({
-          timeout: Number(
-            process.env.OLIVE_SURFACE_TIMEOUT_MS ||
-            6000
-          ),
-        });
+        if (!clicked) {
+          continue;
+        }
 
-      if (surface) {
-        await this.waitUntilReady(surface);
-        return surface;
+        console.log(
+          `[Olive] Clicked trigger during ${label}.`
+        );
+
+        /*
+         * Allow the external widget bootstrap script to create its
+         * iframe/container and textbox.
+         */
+        const surface =
+          await this.findChatSurface({
+            timeout: surfaceTimeout,
+          });
+
+        if (surface) {
+          console.log(
+            `[Olive] Chat surface detected after ${label}.`
+          );
+
+          await this.waitUntilReady(surface);
+          return surface;
+        }
+
+        /*
+         * Do not immediately click another overlapping Olive locator.
+         * The widget may still be initialising. The next open-loop
+         * iteration checks for an existing surface before clicking.
+         */
+        return null;
       }
     }
 
-    void label;
     return null;
   }
 
