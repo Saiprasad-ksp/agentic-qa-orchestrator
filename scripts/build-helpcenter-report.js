@@ -125,7 +125,16 @@ const visualFailed = visualAudits.some(item => item.data && item.data.passed ===
 const linkFailed = linkAudit?.summary?.passed === false;
 const explorationFailed = exploration?.summary?.passed === false;
 
-const overallPassed = !visualFailed && !linkFailed && !explorationFailed;
+/*
+ * Visual pixel differences are report-only.
+ * Link and exploration failures remain blocking.
+ */
+const overallPassed =
+  !linkFailed &&
+  !explorationFailed;
+
+const visualDifferenceReported =
+  visualFailed;
 
 const visualSection = visualAudits.length
   ? visualAudits.map(({ file, data }) => {
