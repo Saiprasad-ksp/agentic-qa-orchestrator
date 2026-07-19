@@ -12,6 +12,15 @@ on:
           - scenario
           - spec
 
+      run_target:
+        description: Browser execution target
+        required: true
+        default: browserstack
+        type: choice
+        options:
+          - local
+          - browserstack
+
       scenario_filename:
         description: Scenario filename ending in .txt
         required: false
@@ -63,11 +72,19 @@ jobs:
     env:
       TARGET_ENV: ${{ inputs.target_env }}
       MOBILE_PLATFORM: ${{ inputs.mobile_platform }}
-      RUN_TARGET: local
+      RUN_TARGET: ${{ inputs.run_target }}
       MAX_RUN_HISTORY: '3'
 
       HEADLESS: 'false'
       PLAYWRIGHT_CHANNEL: chrome
+
+      WEB_BROWSER: chrome
+      WEB_BROWSER_VERSION: latest
+      WEB_OS: Windows
+      WEB_OS_VERSION: '11'
+      BROWSERSTACK_PROJECT: Agentic QA Orchestrator
+      BROWSERSTACK_BUILD: GitHub Actions ${{ github.run_number }}
+      BROWSERSTACK_SESSION: ${{ inputs.scenario_filename }}
 
       WEB_BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
       BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
@@ -90,6 +107,32 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Load BrowserStack credentials
+        if: inputs.run_target == 'browserstack'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CREDENTIAL_FILE="/Users/skaligotla/agentic-qa-credentials/browserstack.env"
+
+          if [[ ! -f "$CREDENTIAL_FILE" ]]; then
+            echo "BrowserStack credential file not found: $CREDENTIAL_FILE"
+            exit 1
+          fi
+
+          while IFS='=' read -r key value; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+
+            case "$key" in
+              BROWSERSTACK_USERNAME|BROWSERSTACK_ACCESS_KEY)
+                echo "::add-mask::$value"
+                echo "$key=$value" >> "$GITHUB_ENV"
+                ;;
+            esac
+          done < "$CREDENTIAL_FILE"
+
+          echo "BrowserStack credentials loaded securely."
 
       - name: Validate workflow inputs
         shell: bash
