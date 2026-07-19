@@ -1,6 +1,8 @@
 TITLE: Olive Agent Handover and End-to-End Chat Validation
 
 PLATFORM: Web
+AUTH_REQUIRED: true
+AUTH_FLOW: Deterministic
 
 TARGET_PATH: /olive-chatbot/auth-flow/reorder
 

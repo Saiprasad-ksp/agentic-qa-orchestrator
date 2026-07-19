@@ -27,3 +27,6 @@ visual-diffs/
 backup-before-*/
 # GitHub self-hosted runner runtime
 actions-runner/
+
+# Local framework credentials
+.credentials/
