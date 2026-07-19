@@ -1,4 +1,24 @@
 const fs = require('fs');
+
+console.error(
+  '[MCP config] ' +
+  JSON.stringify({
+    runTarget: process.env.RUN_TARGET || 'local',
+    targetEnv: process.env.TARGET_ENV || 'not-set',
+    oliveOpenTimeoutMs:
+      process.env.OLIVE_OPEN_TIMEOUT_MS || '60000-default',
+    oliveSurfaceTimeoutMs:
+      process.env.OLIVE_SURFACE_TIMEOUT_MS || '6000-default',
+    oliveGreetingTimeoutMs:
+      process.env.OLIVE_INITIAL_GREETING_TIMEOUT_MS ||
+      '30000-default',
+    browserStackCredentialsAvailable:
+      Boolean(
+        process.env.BROWSERSTACK_USERNAME &&
+        process.env.BROWSERSTACK_ACCESS_KEY
+      ),
+  })
+);
 const path = require('path');
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');

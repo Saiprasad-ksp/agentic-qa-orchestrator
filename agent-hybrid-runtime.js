@@ -217,18 +217,41 @@ function parseToolJson(text) {
 function mcpTransportConfig() {
   const mode = readEnv('MCP_SERVER_MODE', 'local').toLowerCase();
 
+  /*
+   * StdioClientTransport does not automatically forward every custom
+   * environment variable. Explicitly pass the parent environment so the
+   * MCP server receives runner settings, BrowserStack credentials, URL
+   * configuration and Olive timeout values.
+   */
+  const childEnv = Object.fromEntries(
+    Object.entries(process.env)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, String(value)])
+  );
+
   if (mode === 'official') {
     return {
       command: 'npx',
-      args: isWeb ? ['-y', '@playwright/mcp@latest'] : ['-y', 'appium-mcp@latest'],
+      args: isWeb
+        ? ['-y', '@playwright/mcp@latest']
+        : ['-y', 'appium-mcp@latest'],
       stderr: 'inherit',
+      env: childEnv,
     };
   }
 
   return {
     command: process.execPath,
-    args: [path.resolve(__dirname, isWeb ? 'mcp-server.js' : 'mcp-mobile-server.js')],
+    args: [
+      path.resolve(
+        __dirname,
+        isWeb
+          ? 'mcp-server.js'
+          : 'mcp-mobile-server.js'
+      ),
+    ],
     stderr: 'inherit',
+    env: childEnv,
   };
 }
 
