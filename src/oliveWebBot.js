@@ -323,7 +323,10 @@ class OliveWebBot {
 
       const surface =
         await this.findChatSurface({
-          timeout: 6000,
+          timeout: Number(
+            process.env.OLIVE_SURFACE_TIMEOUT_MS ||
+            6000
+          ),
         });
 
       if (surface) {

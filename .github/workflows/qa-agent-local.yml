@@ -54,6 +54,11 @@ jobs:
       HEADLESS: 'false'
       PLAYWRIGHT_CHANNEL: chrome
 
+      # Olive can initialise more slowly in a fresh runner browser profile.
+      OLIVE_OPEN_TIMEOUT_MS: '120000'
+      OLIVE_SURFACE_TIMEOUT_MS: '20000'
+      OLIVE_INITIAL_GREETING_TIMEOUT_MS: '45000'
+
       WEB_BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
       BASE_URL: ${{ inputs.target_env == 'PROD' && 'https://www.woolworths.com.au' || 'https://uatsite.woolworths.com.au' }}
 
