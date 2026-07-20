@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawnSync } = require('child_process');
 const { generateHtmlReport } = require('./generate-rich-report.js');
-const { judgeChatbotResponse } = require('./src/llmJudge');
+const { judgeChatbotResponse, decideNextAction, judgeStructuredOutcome, stateDelta } = require('./src/llmJudge');
 const { loadProjectEnv, readEnv, requireEnv } = require('./src/env');
 const { GoogleGenAI } = require('@google/genai');
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
@@ -16,9 +16,13 @@ if (process.env.GOOGLE_APPLICATION_CREDENTIALS && !path.isAbsolute(process.env.G
 
 const scenariosDir = path.resolve(__dirname, 'scenarios');
 const specsDir = path.resolve(__dirname, 'generated-specs');
-const reportsDir = path.resolve(__dirname, 'reports');
-const screenshotDir = path.resolve(__dirname, 'reports/screenshots');
-const transcriptDir = path.resolve(__dirname, 'reports/transcripts');
+const defaultReportsDir = path.resolve(__dirname, 'reports');
+const configuredRunDir = String(process.env.QA_RUN_DIR || '').trim();
+const reportsDir = configuredRunDir
+  ? path.resolve(configuredRunDir)
+  : defaultReportsDir;
+const screenshotDir = path.resolve(reportsDir, 'screenshots');
+const transcriptDir = path.resolve(reportsDir, 'transcripts');
 
 for (const dir of [specsDir, reportsDir, screenshotDir, transcriptDir]) {
   fs.mkdirSync(dir, { recursive: true });
@@ -255,18 +259,62 @@ function mcpTransportConfig() {
   };
 }
 
+function recordLlmMetadata(metrics, metadata, turnLabel) {
+  if (!metadata) return;
+
+  const event = {
+    turn: turnLabel || metadata.stage || 'LLM call',
+    stage: metadata.stage || turnLabel || 'LLM call',
+    provider: metadata.provider || 'gemini',
+    model: metadata.model || metrics.model,
+    temperature: Number(metadata.temperature ?? metrics.llmTemperature ?? 0),
+    maxOutputTokens: Number(metadata.maxOutputTokens || 0),
+    attempt: Number(metadata.attempt || 1),
+    finishReason: metadata.finishReason || 'UNKNOWN',
+    promptTokenCount: Number(metadata.promptTokenCount || 0),
+    candidatesTokenCount: Number(metadata.candidatesTokenCount || 0),
+    totalTokenCount: Number(metadata.totalTokenCount || 0),
+    cachedContentTokenCount: Number(metadata.cachedContentTokenCount || 0),
+    durationMs: Number(metadata.durationMs || 0),
+    requestPayload: metadata.requestPayload || '',
+    responsePayload: metadata.responsePayload || '',
+  };
+
+  metrics.tokenEvents.push(event);
+  metrics.totalTokens += event.totalTokenCount;
+}
+
 function recordUsage(metrics, response, turnLabel) {
-  const usage = response && response.usageMetadata;
+  const usage = response?.usageMetadata;
   if (!usage) return;
 
-  metrics.tokenEvents.push({
-    turn: turnLabel,
-    promptTokenCount: usage.promptTokenCount,
-    candidatesTokenCount: usage.candidatesTokenCount,
-    totalTokenCount: usage.totalTokenCount,
-  });
+  recordLlmMetadata(metrics, {
+    stage: turnLabel,
+    model: metrics.model,
+    temperature: metrics.llmTemperature,
+    maxOutputTokens: metrics.maxOutputTokens,
+    ...usage,
+  }, turnLabel);
+}
 
-  metrics.totalTokens += Number(usage.totalTokenCount || 0);
+function findRuntimeLabel(state, scope, targetId) {
+  const surface = String(scope || 'CHAT').toUpperCase() === 'PAGE'
+    ? state?.page
+    : (state?.chat || state);
+  const items = [...(surface?.controls || []), ...(surface?.inputs || [])];
+  const match = items.find(item => item?.id === targetId);
+  return match?.label || match?.placeholder || targetId || '';
+}
+
+function meaningfulNewMessages(previousState, currentState) {
+  const beforeSurface = previousState?.chat || previousState || {};
+  const currentSurface = currentState?.chat || currentState || {};
+  const before = new Set((beforeSurface.messages || [])
+    .map(item => String(item?.text || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean));
+  return (currentSurface.messages || [])
+    .map(item => String(item?.text || '').replace(/\s+/g, ' ').trim())
+    .filter(text => text && !before.has(text) && !/^Sent\s+\d/i.test(text));
 }
 
 function attachScreenshots(metrics, outputText) {
@@ -295,6 +343,8 @@ function buildRunMetrics() {
     executionTarget: executionTarget.toUpperCase(),
     targetUrl,
     model: readEnv('GEMINI_MODEL', 'gemini-2.5-flash'),
+    llmTemperature: Number(readEnv('RUNTIME_LLM_TEMPERATURE', '0.1')),
+    maxOutputTokens: Number(readEnv('RUNTIME_MAX_OUTPUT_TOKENS', '1200')),
     llmAuthMode: readEnv('GEMINI_AUTH_MODE', 'api_key'),
     headless: process.env.HEADLESS !== 'false',
     startedAt: new Date().toISOString(),
@@ -334,6 +384,33 @@ function resolveExecutionMode(text) {
 }
 
 
+
+function summariseToolOutput(name, parsed, output) {
+  if (!parsed || typeof parsed !== 'object') {
+    return preview(output, 500);
+  }
+
+  if (name === 'pw_capture_runtime_state') {
+    const chat = parsed.chat || {};
+    const page = parsed.page || {};
+    return [
+      `chat(messages=${chat.messages?.length || 0}, controls=${chat.controls?.length || 0}, inputs=${chat.inputs?.length || 0})`,
+      `page(controls=${page.controls?.length || 0}, inputs=${page.inputs?.length || 0}, text=${page.text?.length || 0})`,
+      page.url ? `url=${page.url}` : '',
+    ].filter(Boolean).join(' | ');
+  }
+
+  if (name === 'pw_execute_runtime_action') {
+    return `executed=${parsed.executed !== false} scope=${parsed.scope || '-'} action=${parsed.action || '-'} target=${parsed.targetId || '-'}`;
+  }
+
+  if (name === 'pw_finalize_run') {
+    return `finalised=${Boolean(parsed.finalised)} videos=${parsed.videoFiles?.length || 0} screenshots=${parsed.screenshotFiles?.length || 0}`;
+  }
+
+  return preview(JSON.stringify(parsed), 700);
+}
+
 async function callMcpDirect(
   mcpClient,
   metrics,
@@ -364,7 +441,8 @@ async function callMcpDirect(
 
   const oliveLongRunningTool =
     name === 'pw_send_olive_message' ||
-    name === 'pw_click_button';
+    name === 'pw_click_button' ||
+    name === 'pw_execute_olive_action';
 
   const timeoutMs =
     authenticatedNavigation
@@ -404,9 +482,14 @@ async function callMcpDirect(
   const failed =
     Boolean(result.isError);
 
-  console.log(
-    output.slice(0, 2500)
-  );
+  const parsedOutput =
+    parseToolJson(output);
+
+  if (readEnv('RUNTIME_LOG_LEVEL', 'summary') === 'raw') {
+    console.log(output.slice(0, 2500));
+  } else {
+    console.log(`↳ ${summariseToolOutput(name, parsedOutput, output)}`);
+  }
 
   attachScreenshots(
     metrics,
@@ -431,7 +514,7 @@ async function callMcpDirect(
     output,
     failed,
     parsed:
-      parseToolJson(output),
+      parsedOutput,
   };
 }
 
@@ -551,6 +634,26 @@ async function finaliseChatDeltaRun({
 
   metrics.failureReason =
     failureReason || null;
+
+  try {
+    const finalised = await callMcpDirect(
+      mcpClient,
+      metrics,
+      'pw_finalize_run',
+      {},
+      metrics.steps.length + 1
+    );
+    if (finalised?.parsed) {
+      metrics.runtimeArtifacts = finalised.parsed;
+      metrics.artifacts = [
+        ...(Array.isArray(metrics.artifacts) ? metrics.artifacts : []),
+        ...(finalised.parsed.videoFiles || []),
+        ...(finalised.parsed.screenshotFiles || []),
+      ];
+    }
+  } catch (error) {
+    console.warn(`⚠️ Runtime finalisation warning: ${error.message}`);
+  }
 
   const transcriptPath =
     path.join(
@@ -791,15 +894,6 @@ async function executeChatDeltaFlow({
   metrics,
   runStartMs,
 }) {
-  const ai =
-    createGeminiClient();
-
-  const model =
-    readEnv(
-      'GEMINI_MODEL',
-      'gemini-2.5-flash'
-    );
-
   const maxTurns =
     Number(
       readScenarioHeader(
@@ -809,16 +903,73 @@ async function executeChatDeltaFlow({
       )
     );
 
+  const maxNoProgressTurns =
+    Number(
+      process.env
+        .MAX_NO_PROGRESS_TURNS ||
+      3
+    );
+
   let runtimeTurn = 0;
-  let customerTurns = 0;
   let testFailed = false;
   let failureReason = '';
-  let latest = null;
+  let completed = false;
+
+  const history = [];
+
+  const memory = {
+    conversationSummary: '',
+    goalStatus:
+      'IN_PROGRESS',
+    completedProgress: [],
+    unresolvedRequests: [],
+    noProgressTurns: 0,
+    lastState: null,
+  };
+
+  const normaliseSurface = surface => ({
+    ready: Boolean(surface?.surfaceReady ?? surface?.ready),
+    busy: Boolean(surface?.busy),
+    url: String(surface?.url || ''),
+    messages: (surface?.messages || [])
+      .slice(-8)
+      .map(message => String(message?.text || '').replace(/\s+/g, ' ').trim()),
+    controls: (surface?.controls || [])
+      .filter(control => control?.enabled !== false)
+      .map(control => ({
+        id: control.id,
+        type: control.type,
+        label: String(control.label || '').replace(/\s+/g, ' ').trim(),
+      })),
+    inputs: (surface?.inputs || [])
+      .filter(input => input?.enabled !== false)
+      .map(input => ({
+        id: input.id,
+        type: input.type,
+        placeholder: String(input.placeholder || '').replace(/\s+/g, ' ').trim(),
+      })),
+    text: (surface?.text || []).slice(-30),
+  });
+
+  const normaliseStateForSignature = state => ({
+    chat: normaliseSurface(state?.chat || state),
+    page: normaliseSurface(state?.page || {}),
+  });
+
+  const stateSignature =
+    state =>
+      JSON.stringify(
+        normaliseStateForSignature(
+          state
+        )
+      );
+
+  let previousSignature = '';
 
   try {
     runtimeTurn += 1;
 
-    let result =
+    let toolResult =
       await callMcpDirect(
         mcpClient,
         metrics,
@@ -829,7 +980,7 @@ async function executeChatDeltaFlow({
         runtimeTurn
       );
 
-    if (result.failed) {
+    if (toolResult.failed) {
       throw new Error(
         'Navigation failed.'
       );
@@ -837,7 +988,7 @@ async function executeChatDeltaFlow({
 
     runtimeTurn += 1;
 
-    result =
+    toolResult =
       await callMcpDirect(
         mcpClient,
         metrics,
@@ -846,285 +997,564 @@ async function executeChatDeltaFlow({
         runtimeTurn
       );
 
-    if (result.failed) {
+    if (toolResult.failed) {
       throw new Error(
-        'Olive could not be opened.'
+        'Unable to open Olive.'
       );
     }
 
-    let decision = {
-      action: 'SEND_MESSAGE',
-      value: 'Reorder',
-      expectedIntent:
-        'Authenticated reorder journey starts and recent-order choices are offered.',
-      acceptanceCriteria: [
-        'Recognises reorder intent',
-        'Does not request login',
-        'Offers recent-order selection or entry',
-      ],
-      reason:
-        'Deterministic first business action from the scenario.',
-    };
-
-    while (
-      !testFailed &&
-      customerTurns < maxTurns
+    for (
+      let customerTurn = 1;
+      customerTurn <= maxTurns;
+      customerTurn += 1
     ) {
-      if (
-        decision.action ===
-        'SEND_MESSAGE'
-      ) {
-        customerTurns += 1;
-        runtimeTurn += 1;
+      runtimeTurn += 1;
 
-        result =
-          await callMcpDirect(
-            mcpClient,
-            metrics,
-            'pw_send_olive_message',
-            {
-              text:
-                String(
-                  decision.value || ''
-                ).trim(),
-            },
-            runtimeTurn
-          );
-      } else if (
-        decision.action ===
-        'CLICK_CONTROL'
-      ) {
-        const runtimeControlText =
-          resolveRuntimeControlText(
-            decision.value,
-            latest
-          );
-
-        if (!runtimeControlText) {
-          testFailed = true;
-
-          failureReason =
-            'CLICK_CONTROL did not resolve to a visible runtime control.';
-
-          break;
-        }
-
-        runtimeTurn += 1;
-
-        result =
-          await callMcpDirect(
-            mcpClient,
-            metrics,
-            'pw_click_button',
-            {
-              targetText:
-                runtimeControlText,
-            },
-            runtimeTurn
-          );
-
-        /*
-         * pw_click_button returns the Olive response delta.
-         * Do not read the complete transcript after the click.
-         */
-      } else if (
-        decision.action ===
-        'TAKE_SCREENSHOT'
-      ) {
-        runtimeTurn += 1;
-
-        result =
-          await callMcpDirect(
-            mcpClient,
-            metrics,
-            'pw_take_screenshot',
-            {
-              filename:
-                decision.value ||
-                `chat_delta_${runtimeTurn}`,
-            },
-            runtimeTurn
-          );
-      } else if (
-        decision.action ===
-        'COMPLETE'
-      ) {
-        break;
-      } else {
-        testFailed = true;
-
-        failureReason =
-          decision.reason ||
-          'Planner marked the scenario as failed.';
-
-        break;
-      }
-
-      if (result.failed) {
-        testFailed = true;
-
-        failureReason =
-          decision.action ===
-          'CLICK_CONTROL'
-            ? 'CLICK_CONTROL failed for the selected runtime control.'
-            : `${decision.action} failed: ${
-                decision.value || ''
-              }`.trim();
-
-        break;
-      }
-
-      latest =
-        result.parsed || {
-          botResponse:
-            result.output,
-          conversationState:
-            'UNKNOWN',
-        };
-
-      const conversationState =
-        String(
-          latest.conversationState ||
-          'UNKNOWN'
+      const capture =
+        await callMcpDirect(
+          mcpClient,
+          metrics,
+          'pw_capture_runtime_state',
+          {},
+          runtimeTurn
         );
-
-      const botResponse =
-        String(
-          latest.botResponse ||
-          latest.output ||
-          result.output ||
-          ''
-        );
-
-      metrics.conversationTurns.push({
-        turn: customerTurns,
-        userMessage:
-          decision.action ===
-          'SEND_MESSAGE'
-            ? decision.value
-            : `[${decision.action}: ${decision.value}]`,
-        botResponse,
-        conversationState,
-      });
-
-      metrics.transcript.push({
-        turn: customerTurns,
-        type: 'olive_message',
-        userMessage:
-          decision.value || '',
-        botResponse,
-        conversationState,
-      });
 
       if (
-        conversationState ===
-          'AUTHENTICATION_REQUIRED' ||
-        /you(?:'|’)ll need to log in|log in first/i.test(
-          botResponse
-        )
+        capture.failed ||
+        !capture.parsed
       ) {
-        testFailed = true;
-
-        failureReason =
-          'Authenticated scenario was unexpectedly logged out. Olive requested login.';
-
-        break;
+        throw new Error(
+          'Structured runtime state capture failed.'
+        );
       }
 
-      if (decision.expectedIntent) {
-        const judgement =
-          await judgeChatbotResponse({
-            userMessage:
-              decision.value || '',
-            botResponse,
-            expectedIntent:
-              decision.expectedIntent,
-            acceptanceCriteria:
-              decision.acceptanceCriteria ||
-              [],
-            blockedPatterns: [
-              'log in first',
-              'unexpected error',
-              'something went wrong',
-            ],
-            currentState:
-              conversationState,
-            allowedNextStates:
-              conversationState &&
-              conversationState !== 'UNKNOWN'
-                ? [conversationState]
-                : [],
-            flowId: baseName,
-            flowContext: null,
-          });
+      const previousState =
+        capture.parsed;
 
-        metrics.validations.push(
-          judgement
-        );
+      const action =
+        await decideNextAction({
+          scenario:
+            scenarioText,
+          state:
+            previousState,
+          history,
+          memory,
+        });
 
-        metrics.judgements.push(
-          judgement
-        );
-
-        if (!judgement.passed) {
-          testFailed = true;
-
-          failureReason =
-            judgement.summary ||
-            'Semantic validation failed.';
-
-          break;
-        }
-      }
-
-      const plannerState = {
-        customerTurns,
-        maxTurns,
-        lastAction:
-          decision.action,
-        lastValue:
-          decision.value,
-        conversationState,
-        botResponse:
-          redactChatStateForPlanner(
-            botResponse
-          ),
-        completedRuntimeSteps:
-          metrics.steps.map(
-            step => step.name
-          ),
-      };
-
-      const planned =
-        await getChatDeltaDecision(
-          ai,
-          model,
-          targetScenario,
-          plannerState
-        );
-
-      recordUsage(
+      recordLlmMetadata(
         metrics,
-        planned.response,
-        `CHAT_DELTA decision ${customerTurns}`
+        action._llm,
+        `Planner turn ${customerTurn}`
       );
-
-      decision =
-        planned.decision;
+      delete action._llm;
 
       console.log(
-        `🧠 Planner intent: ${decision.action} ${decision.value || ''} — ${decision.reason || ''}`
+        `🧠 Planner: ` +
+        `${action.action}` +
+        `${
+          action.targetId
+            ? ` ${action.targetId}`
+            : ''
+        } — ${action.reason}`
       );
+
+      if (
+        action.conversationSummary
+      ) {
+        memory.conversationSummary =
+          action.conversationSummary;
+      }
+
+      if (
+        action.goalStatus
+      ) {
+        memory.goalStatus =
+          action.goalStatus;
+      }
+
+      if (
+        action.action ===
+        'COMPLETE'
+      ) {
+        /*
+         * Planner completion is accepted only when it refers to
+         * visible state. Record it as the final decision.
+         */
+        completed = true;
+
+        history.push({
+          turn:
+            customerTurn,
+          action,
+          stateSummary:
+            normaliseStateForSignature(
+              previousState
+            ),
+        });
+
+        break;
+      }
+
+      if (
+        action.action === 'FAIL'
+      ) {
+        throw new Error(
+          action.reason ||
+          'Planner reported an application failure.'
+        );
+      }
+
+      runtimeTurn += 1;
+
+      const execution =
+        await callMcpDirect(
+          mcpClient,
+          metrics,
+          'pw_execute_runtime_action',
+          {
+            action:
+              action.action,
+            scope:
+              action.scope || 'CHAT',
+            targetId:
+              action.targetId || '',
+            value:
+              action.value || '',
+            waitMs:
+              action.waitMs || 0,
+            reason:
+              action.reason || '',
+          },
+          runtimeTurn
+        );
+
+      if (execution.failed) {
+        throw new Error(
+          `Action ${action.action} failed.`
+        );
+      }
+
+      /*
+       * Browser and chatbot UIs frequently render in multiple asynchronous
+       * phases. Keep polling locally and call Gemini only after a meaningful
+       * state change has remained stable. This avoids judging an intermediate
+       * empty state and does not consume additional LLM tokens while polling.
+       */
+      const settleTimeoutMs = Number(
+        process.env.RUNTIME_STATE_SETTLE_TIMEOUT_MS ||
+        process.env.OLIVE_POST_ACTION_SETTLE_TIMEOUT_MS ||
+        65000
+      );
+      const settlePollIntervalMs = Number(
+        process.env.RUNTIME_STATE_POLL_INTERVAL_MS ||
+        750
+      );
+      const requiredStablePolls = Math.max(
+        2,
+        Number(process.env.RUNTIME_STATE_STABLE_POLLS || 2)
+      );
+      const blockedMinWaitMs = Number(
+        process.env.RUNTIME_BLOCKED_MIN_WAIT_MS ||
+        15000
+      );
+
+      const beforeActionSignature = stateSignature(previousState);
+      const settleStartedAt = Date.now();
+      const settleDeadline = settleStartedAt + settleTimeoutMs;
+
+      let currentState = null;
+      let lastCapturedState = null;
+      let lastCapturedSignature = '';
+      let stablePolls = 0;
+      let meaningfulChangeSeen = false;
+      let captureCount = 0;
+
+      while (Date.now() < settleDeadline) {
+        runtimeTurn += 1;
+        captureCount += 1;
+
+        const nextCapture = await callMcpDirect(
+          mcpClient,
+          metrics,
+          'pw_capture_runtime_state',
+          {},
+          runtimeTurn
+        );
+
+        if (nextCapture.failed || !nextCapture.parsed) {
+          throw new Error('Post-action runtime state capture failed.');
+        }
+
+        const candidateState = nextCapture.parsed;
+        const candidateSignature = stateSignature(candidateState);
+        const changedFromBefore = candidateSignature !== beforeActionSignature;
+        const runtimeBusy = [candidateState.chat, candidateState.page]
+          .filter(Boolean)
+          .some(surface => surface.busy === true);
+
+        meaningfulChangeSeen = meaningfulChangeSeen || changedFromBefore;
+        lastCapturedState = candidateState;
+
+        if (candidateSignature === lastCapturedSignature) {
+          stablePolls += 1;
+        } else {
+          lastCapturedSignature = candidateSignature;
+          stablePolls = 1;
+        }
+
+        const waitedMs = Date.now() - settleStartedAt;
+        const stableAfterMeaningfulChange =
+          meaningfulChangeSeen &&
+          !runtimeBusy &&
+          stablePolls >= requiredStablePolls;
+        const timedOutAfterMinimumWait =
+          waitedMs >= blockedMinWaitMs &&
+          Date.now() + settlePollIntervalMs >= settleDeadline;
+
+        if (stableAfterMeaningfulChange || timedOutAfterMinimumWait) {
+          currentState = candidateState;
+          break;
+        }
+
+        await new Promise(resolve =>
+          setTimeout(resolve, settlePollIntervalMs)
+        );
+      }
+
+      currentState = currentState || lastCapturedState;
+
+      if (!currentState) {
+        throw new Error('No post-action runtime state was captured.');
+      }
+
+      const settleEvidence = {
+        captureCount,
+        waitedMs: Date.now() - settleStartedAt,
+        meaningfulChangeSeen,
+        stablePolls,
+        requiredStablePolls,
+      };
+
+      console.log(
+        `⏳ State settled after ${settleEvidence.waitedMs}ms ` +
+        `(${settleEvidence.captureCount} captures, ` +
+        `stable=${settleEvidence.stablePolls}/${settleEvidence.requiredStablePolls}, ` +
+        `changed=${settleEvidence.meaningfulChangeSeen ? 'YES' : 'NO'})`
+      );
+
+      const currentSignature =
+        stateSignature(
+          currentState
+        );
+
+      const observableStateChanged =
+        currentSignature !==
+        previousSignature;
+
+      const judgement =
+        await judgeStructuredOutcome({
+          scenario:
+            scenarioText,
+          previousState,
+          action,
+          result:
+            execution.parsed || {
+              executed: true,
+            },
+          currentState,
+          memory,
+        });
+
+      recordLlmMetadata(
+        metrics,
+        judgement._llm,
+        `Judge turn ${customerTurn}`
+      );
+      const judgeLlm = judgement._llm || null;
+      delete judgement._llm;
+
+      const customerActionLabel = findRuntimeLabel(
+        previousState,
+        action.scope,
+        action.targetId
+      );
+      const userMessage = action.action === 'SEND_MESSAGE' || action.action === 'TYPE'
+        ? String(action.value || '')
+        : customerActionLabel;
+      const botMessages = meaningfulNewMessages(previousState, currentState);
+      const delta = stateDelta(previousState, currentState, scenarioText);
+
+      metrics.judgements.push(judgement);
+      metrics.validations.push({
+        turn: customerTurn,
+        passed: judgement.passed,
+        complete: judgement.complete,
+        goalStatus: judgement.goalStatus,
+        madeProgress: judgement.madeProgress,
+        score: judgement.score,
+        reason: judgement.reason,
+        summary: judgement.reason,
+        userMessage,
+        customerAction: {
+          scope: action.scope,
+          action: action.action,
+          targetId: action.targetId || '',
+          label: customerActionLabel,
+          value: action.action === 'SEND_MESSAGE' || action.action === 'TYPE'
+            ? String(action.value || '')
+            : '',
+        },
+        botResponse: botMessages.join('\n'),
+        botMessages,
+        expectedIntent: action.expectedProgress || '',
+        intentMatched: judgement.goalStatus !== 'FAILED',
+        safe: true,
+        detectedState: judgement.goalStatus,
+        judgeMode: 'llm_structured',
+        evidence: Array.isArray(judgement.evidence) ? judgement.evidence : [],
+        issues: judgement.passed ? [] : [judgement.reason],
+        stateDelta: delta,
+        settleEvidence,
+        llm: judgeLlm ? {
+          model: judgeLlm.model,
+          temperature: judgeLlm.temperature,
+          promptTokenCount: judgeLlm.promptTokenCount,
+          candidatesTokenCount: judgeLlm.candidatesTokenCount,
+          cachedContentTokenCount: judgeLlm.cachedContentTokenCount,
+          totalTokenCount: judgeLlm.totalTokenCount,
+          finishReason: judgeLlm.finishReason,
+          requestPayload: judgeLlm.requestPayload,
+          responsePayload: judgeLlm.responsePayload,
+        } : null,
+      });
+
+      memory.conversationSummary =
+        judgement
+          .conversationSummary ||
+        memory.conversationSummary;
+
+      memory.goalStatus =
+        judgement.goalStatus ||
+        'IN_PROGRESS';
+
+      memory.completedProgress =
+        Array.isArray(
+          judgement.completedProgress
+        )
+          ? judgement
+              .completedProgress
+          : memory
+              .completedProgress;
+
+      memory.unresolvedRequests =
+        Array.isArray(
+          judgement.unresolvedRequests
+        )
+          ? judgement
+              .unresolvedRequests
+          : memory
+              .unresolvedRequests;
+
+      const judgeMadeProgress = judgement.madeProgress === true;
+      const madeProgress = judgeMadeProgress || observableStateChanged;
+
+      if (madeProgress) {
+        memory.noProgressTurns = 0;
+      } else {
+        memory.noProgressTurns += 1;
+      }
+
+      history.push({
+        turn:
+          customerTurn,
+        action,
+        expectedProgress:
+          action.expectedProgress,
+        judgement,
+        stateSummary:
+          normaliseStateForSignature(
+            currentState
+          ),
+      });
+
+      previousSignature =
+        currentSignature;
+      memory.lastState = currentState;
+
+      console.log(
+        `🧪 Judge: ` +
+        `${judgement.goalStatus}` +
+        ` / progress=${
+          madeProgress
+            ? 'YES'
+            : 'NO'
+        } — ${judgement.reason}`
+      );
+
+      if (
+        judgement.goalStatus ===
+        'COMPLETE'
+      ) {
+        completed = true;
+        break;
+      }
+
+      if (
+        judgement.goalStatus ===
+        'FAILED'
+      ) {
+        /*
+         * An LLM statement such as "Olive failed to acknowledge"
+         * is not application evidence. Failure must be supported
+         * by text currently visible in the application.
+         */
+        const visibleApplicationText =
+          [
+            ...((currentState.chat?.messages || currentState.messages || []))
+              .map(message =>
+                String(
+                  message?.text || ''
+                )
+              ),
+          ]
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        const explicitApplicationFailure =
+          /\b(?:something went wrong|technical error|system error|unable to complete|cannot complete|can't complete|could not complete|service unavailable|try again later|not eligible|request declined|request denied)\b/i
+            .test(
+              visibleApplicationText
+            );
+
+        const shellControlPattern =
+          /^(?:minimise(?: the chat)?|close(?: the chat)?|send|start voice input|privacy policy|collection notice)$/i;
+
+        const actionableBusinessControls =
+          ([...(currentState.chat?.controls || currentState.controls || []), ...(currentState.page?.controls || [])])
+            .filter(control =>
+              control?.enabled !== false
+            )
+            .filter(control =>
+              !shellControlPattern.test(
+                String(
+                  control?.label || ''
+                ).trim()
+              )
+            );
+
+        const usableInputs =
+          ([...(currentState.chat?.inputs || currentState.inputs || []), ...(currentState.page?.inputs || [])])
+            .filter(input =>
+              input?.enabled !== false
+            );
+
+        /*
+         * An enabled business control or usable input means the
+         * conversation can continue. It cannot be classified as
+         * FAILED merely because an expected sentence is absent.
+         */
+        const conversationCanContinue =
+          actionableBusinessControls.length > 0 ||
+          usableInputs.length > 0;
+
+        if (
+          explicitApplicationFailure &&
+          !conversationCanContinue
+        ) {
+          throw new Error(
+            judgement.reason ||
+            'Application failure was detected.'
+          );
+        }
+
+        console.warn(
+          '⚠️ Judge returned FAILED without explicit application ' +
+          'failure evidence. Continuing as IN_PROGRESS.'
+        );
+
+        judgement.goalStatus =
+          'IN_PROGRESS';
+
+        judgement.passed = true;
+        judgement.complete = false;
+        judgement.shouldContinue = true;
+
+        judgement.reason =
+          conversationCanContinue
+            ? 'The application still presents an actionable control or input, so the conversation can continue.'
+            : 'No explicit application failure is visible. Waiting for further conversational progress.';
+
+        memory.goalStatus =
+          'IN_PROGRESS';
+      }
+
+      if (
+        judgement.goalStatus ===
+        'BLOCKED'
+      ) {
+        const shellControlPattern =
+          /^(?:minimise(?: the chat)?|close(?: the chat)?|send|start voice input|privacy policy|collection notice)$/i;
+        const actionableControls = [
+          ...(currentState.chat?.controls || currentState.controls || []),
+          ...(currentState.page?.controls || []),
+        ].filter(control =>
+          control?.enabled !== false &&
+          !shellControlPattern.test(String(control?.label || '').trim())
+        );
+        const usableInputs = [
+          ...(currentState.chat?.inputs || currentState.inputs || []),
+          ...(currentState.page?.inputs || []),
+        ].filter(input => input?.enabled !== false);
+        const trulyBlocked =
+          settleEvidence.waitedMs >= blockedMinWaitMs &&
+          !settleEvidence.meaningfulChangeSeen &&
+          actionableControls.length === 0 &&
+          usableInputs.length === 0;
+
+        if (trulyBlocked) {
+          throw new Error(
+            judgement.reason ||
+            'Conversation is blocked after the full settling period.'
+          );
+        }
+
+        console.warn(
+          '⚠️ Judge returned BLOCKED before conclusive application evidence. ' +
+          'Continuing as IN_PROGRESS.'
+        );
+        judgement.goalStatus = 'IN_PROGRESS';
+        judgement.passed = true;
+        judgement.complete = false;
+        judgement.shouldContinue = true;
+        judgement.reason =
+          'The application changed or still provides an actionable control/input; ' +
+          'the runtime will continue rather than treating a transient state as blocked.';
+        memory.goalStatus = 'IN_PROGRESS';
+      }
+
+      /*
+       * A single unexpected or unchanged response is not a failure.
+       * Fail only after repeated turns with no observable or semantic
+       * progress.
+       */
+      if (
+        memory.noProgressTurns >=
+        maxNoProgressTurns
+      ) {
+        throw new Error(
+          `Conversation made no progress for ` +
+          `${memory.noProgressTurns} consecutive turns. ` +
+          `${judgement.reason || ''}`.trim()
+        );
+      }
     }
 
-    if (
-      !testFailed &&
-      customerTurns >= maxTurns
-    ) {
-      testFailed = true;
-
-      failureReason =
-        `Reached MAX_CUSTOMER_TURNS=${maxTurns} before completing mandatory outcomes.`;
+    if (!completed) {
+      throw new Error(
+        `Scenario did not complete within ` +
+        `${maxTurns} customer turns.`
+      );
     }
   } catch (error) {
     testFailed = true;
@@ -1132,7 +1562,8 @@ async function executeChatDeltaFlow({
       error.message;
 
     console.error(
-      `❌ CHAT_DELTA failure: ${error.stack || error.message}`
+      `❌ CHAT_DELTA failure: ` +
+      `${error.stack || error.message}`
     );
   }
 

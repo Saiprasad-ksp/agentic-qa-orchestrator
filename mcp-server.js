@@ -35,10 +35,16 @@ let browser = null;
 let browserContext = null;
 let page = null;
 let olive = null;
+let pageRuntimeElements = new Map();
+let pageRuntimeSequence = 0;
 
 const rootDir = __dirname;
-const reportsDir = path.resolve(rootDir, 'reports');
+const defaultReportsDir = path.resolve(rootDir, 'reports');
+const reportsDir = String(process.env.QA_RUN_DIR || '').trim()
+  ? path.resolve(process.env.QA_RUN_DIR)
+  : defaultReportsDir;
 const screenshotsDir = path.resolve(reportsDir, 'screenshots');
+const videosDir = path.resolve(reportsDir, 'videos');
 const baselineDir = path.resolve(rootDir, 'visual-baselines');
 const actualDir = path.resolve(rootDir, 'visual-actuals');
 const diffDir = path.resolve(rootDir, 'visual-diffs');
@@ -50,7 +56,7 @@ const server = new Server(
 );
 
 function ensureDirs() {
-  for (const dir of [reportsDir, screenshotsDir, baselineDir, actualDir, diffDir, auditDir]) {
+  for (const dir of [reportsDir, screenshotsDir, videosDir, baselineDir, actualDir, diffDir, auditDir]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 }
@@ -587,6 +593,14 @@ async function ensurePage() {
         height: 1100,
       },
     };
+
+    if (readEnv('RUN_TARGET', 'local').toLowerCase() !== 'browserstack' &&
+        String(process.env.RECORD_VIDEO || 'true').toLowerCase() !== 'false') {
+      contextOptions.recordVideo = {
+        dir: videosDir,
+        size: { width: 1440, height: 1100 },
+      };
+    }
 
     const configuredStorageState =
       String(
@@ -1158,6 +1172,142 @@ async function exploreHelpCenter(activePage, options = {}) {
   return exploration;
 }
 
+
+function redactRuntimeValue(value) {
+  return String(value || '')
+    .replace(/\b\d{6,}\b/g, '[REDACTED_ID]')
+    .replace(/\b[A-Z0-9]{12,}\b/gi, '[REDACTED_TOKEN]')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function capturePageState(activePage) {
+  pageRuntimeElements.clear();
+  pageRuntimeSequence = 0;
+  const controls = [];
+  const inputs = [];
+  const seen = new Set();
+  const candidates = activePage.locator('button, a[href], [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], [role="radio"]');
+  const count = Math.min(await candidates.count().catch(() => 0), 180);
+  for (let index = 0; index < count; index += 1) {
+    const locator = candidates.nth(index);
+    if (!(await locator.isVisible({ timeout: 100 }).catch(() => false))) continue;
+    const rawLabel = String(
+      await locator.getAttribute('aria-label').catch(() => '') ||
+      await locator.innerText().catch(() => '') ||
+      await locator.getAttribute('title').catch(() => '') || ''
+    ).replace(/\s+/g, ' ').trim();
+    if (!rawLabel || rawLabel.length > 300) continue;
+    const role = await locator.getAttribute('role').catch(() => '') || await locator.evaluate(el => el.tagName.toLowerCase()).catch(() => 'control');
+    const key = `${role}|${rawLabel}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pageRuntimeSequence += 1;
+    const id = `page_control_${pageRuntimeSequence}`;
+    pageRuntimeElements.set(id, { locator, kind: 'control', rawLabel });
+    controls.push({
+      id,
+      type: role,
+      label: redactRuntimeValue(rawLabel),
+      enabled: !(await locator.isDisabled().catch(() => false)) && await locator.getAttribute('aria-disabled').catch(() => null) !== 'true',
+    });
+  }
+  const inputCandidates = activePage.locator('textarea, input:not([type="hidden"]), select, [contenteditable="true"], [role="textbox"], [role="combobox"]');
+  const inputCount = Math.min(await inputCandidates.count().catch(() => 0), 40);
+  for (let index = 0; index < inputCount; index += 1) {
+    const locator = inputCandidates.nth(index);
+    if (!(await locator.isVisible({ timeout: 100 }).catch(() => false))) continue;
+    pageRuntimeSequence += 1;
+    const id = `page_input_${pageRuntimeSequence}`;
+    pageRuntimeElements.set(id, { locator, kind: 'input' });
+    inputs.push({
+      id,
+      type: await locator.getAttribute('type').catch(() => null) || await locator.getAttribute('role').catch(() => null) || 'text',
+      placeholder: redactRuntimeValue(await locator.getAttribute('placeholder').catch(() => '') || await locator.getAttribute('aria-label').catch(() => '') || ''),
+      enabled: !(await locator.isDisabled().catch(() => false)) && await locator.getAttribute('aria-disabled').catch(() => null) !== 'true',
+    });
+  }
+  const text = await activePage.locator('main, [role="main"], body').first().evaluate(element => {
+    const values = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode() && values.length < 160) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent) continue;
+      const style = getComputedStyle(parent);
+      const rect = parent.getBoundingClientRect();
+      const value = String(node.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!value || value.length < 2 || value.length > 500) continue;
+      if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0) continue;
+      values.push(value);
+    }
+    return [...new Set(values)];
+  }).catch(() => []);
+  return {
+    surfaceReady: true,
+    busy: false,
+    url: activePage.url(),
+    title: await activePage.title().catch(() => ''),
+    controls,
+    inputs,
+    text: text.map(redactRuntimeValue).slice(-120),
+    capturedAt: new Date().toISOString(),
+  };
+}
+
+async function executePageAction(activePage, action = {}) {
+  const kind = String(action.action || '').toUpperCase();
+  if (kind === 'WAIT') {
+    await activePage.waitForTimeout(Math.min(Math.max(Number(action.waitMs || 1200), 250), 10000));
+    return { executed: true, action: kind, scope: 'PAGE' };
+  }
+  const entry = pageRuntimeElements.get(String(action.targetId || ''));
+  if (!entry) throw new Error(`Page runtime element not found: ${action.targetId || '<none>'}`);
+  const locator = entry.locator;
+  if (!(await locator.isVisible({ timeout: 2000 }).catch(() => false))) throw new Error(`Page runtime element is no longer visible: ${action.targetId}`);
+  if (kind === 'CLICK') {
+    await locator.scrollIntoViewIfNeeded().catch(() => {});
+    await locator.click({ timeout: 10000 });
+  } else if (kind === 'TYPE') {
+    await locator.click({ timeout: 10000 });
+    await locator.fill(String(action.value || '')).catch(async () => {
+      await locator.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
+      await locator.type(String(action.value || ''), { delay: 8 });
+    });
+  } else {
+    throw new Error(`Unsupported PAGE action: ${kind}`);
+  }
+  await activePage.waitForTimeout(500);
+  return { executed: true, action: kind, scope: 'PAGE', targetId: action.targetId };
+}
+
+async function finaliseRuntime() {
+  const videoCandidates = [];
+  if (browserContext) {
+    for (const candidatePage of browserContext.pages()) {
+      const video = candidatePage.video?.();
+      if (video) videoCandidates.push(video);
+    }
+    await browserContext.close().catch(() => {});
+    browserContext = null;
+    page = null;
+    olive = null;
+  }
+  if (browser) {
+    await browser.close().catch(() => {});
+    browser = null;
+  }
+  const videoFiles = [];
+  for (const video of videoCandidates) {
+    const videoPath = await video.path().catch(() => '');
+    if (videoPath) videoFiles.push(videoPath);
+  }
+  const screenshotFiles = fs.existsSync(screenshotsDir)
+    ? fs.readdirSync(screenshotsDir).filter(name => /\.(png|jpg|jpeg|webp)$/i.test(name)).map(name => path.join(screenshotsDir, name))
+    : [];
+  return { finalised: true, videoFiles, screenshotFiles };
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -1228,6 +1378,52 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'pw_open_olive',
       description: 'Open the Woolworths Olive / Ask Anything chat surface and wait until a chat textbox is available.',
       inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'pw_capture_runtime_state',
+      description: 'Capture structured state from both the chatbot and the surrounding application page using runtime-only element IDs.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'pw_execute_runtime_action',
+      description: 'Execute a generic action against CHAT or PAGE scope using a runtime element ID.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['CHAT', 'PAGE'] },
+          action: { type: 'string', enum: ['CLICK', 'TYPE', 'SEND_MESSAGE', 'WAIT'] },
+          targetId: { type: 'string' },
+          value: { type: 'string' },
+          waitMs: { type: 'number' },
+          reason: { type: 'string' },
+        },
+        required: ['scope', 'action'],
+      },
+    },
+    {
+      name: 'pw_finalize_run',
+      description: 'Close the runtime browser context and finalise run-scoped video and screenshot artifacts.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'pw_capture_olive_state',
+      description: 'Capture scenario-independent structured Olive UI state with runtime-only element IDs.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'pw_execute_olive_action',
+      description: 'Execute a generic Olive action using a runtime element ID.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['CLICK', 'TYPE', 'SEND_MESSAGE', 'WAIT', 'COMPLETE', 'FAIL'] },
+          targetId: { type: 'string' },
+          value: { type: 'string' },
+          waitMs: { type: 'number' },
+          reason: { type: 'string' },
+        },
+        required: ['action'],
+      },
     },
     {
       name: 'pw_send_olive_message',
@@ -1497,6 +1693,39 @@ ${exploration.screenshots.join('\n')}
             }),
           }],
         };
+      }
+
+      case 'pw_capture_runtime_state': {
+        const chat = await olive.captureStructuredState();
+        const pageState = await capturePageState(activePage);
+        return { content: [{ type: 'text', text: JSON.stringify({ chat, page: pageState, capturedAt: new Date().toISOString() }) }] };
+      }
+
+      case 'pw_execute_runtime_action': {
+        const scope = String(args.scope || 'CHAT').toUpperCase();
+        const result = scope === 'PAGE'
+          ? await executePageAction(activePage, args)
+          : await olive.executeStructuredAction(args);
+        let screenshotPathValue = '';
+        if (String(process.env.CAPTURE_RUNTIME_SCREENSHOTS || 'true').toLowerCase() !== 'false') {
+          screenshotPathValue = await takeFullPageScreenshot(activePage, `runtime-${Date.now()}-${scope.toLowerCase()}-${String(args.action || 'action').toLowerCase()}`, screenshotsDir).catch(() => '');
+        }
+        return { content: [{ type: 'text', text: JSON.stringify({ ...result, scope, screenshotPath: screenshotPathValue }) }] };
+      }
+
+      case 'pw_finalize_run': {
+        const result = await finaliseRuntime();
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+
+      case 'pw_capture_olive_state': {
+        const state = await olive.captureStructuredState();
+        return { content: [{ type: 'text', text: JSON.stringify(state) }] };
+      }
+
+      case 'pw_execute_olive_action': {
+        const result = await olive.executeStructuredAction(args);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
 
       case 'pw_send_olive_message': {

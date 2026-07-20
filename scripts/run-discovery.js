@@ -349,6 +349,21 @@ function main() {
 
   const startedAt = new Date().toISOString();
   const runId = startedAt.replace(/[:.]/g, '-');
+  const runDir = path.join(
+    projectRoot,
+    'reports',
+    'runs',
+    scenarioBase,
+    runId
+  );
+  ensureDir(runDir);
+  const scenarioContentForType = fs.readFileSync(
+    absoluteScenarioPath,
+    'utf8'
+  );
+  const scenarioType = /^TEST_TYPE:\s*Generative/im.test(scenarioContentForType) || /@generative\b/i.test(scenarioContentForType)
+    ? 'generative'
+    : (/visual|faq|helpcenter/i.test(scenarioContentForType) ? 'visual' : 'generic');
 
   const guardLogPath = path.join(
     discoveryDir,
@@ -406,6 +421,10 @@ function main() {
         AUTO_RUN_GENERATED_SPEC: 'false',
         DISABLE_SPEC_GENERATION: 'true',
         DISCOVERY_GUARD_LOG: guardLogPath,
+        QA_RUN_DIR: runDir,
+        QA_RUN_ID: runId,
+        QA_SCENARIO_NAME: scenarioBase,
+        QA_SCENARIO_TYPE: scenarioType,
       },
     }
   );
@@ -454,6 +473,8 @@ function main() {
     scenarioArgument,
     scenarioBase,
     runId,
+    runDir,
+    scenarioType,
     startedAt,
     completedAt: new Date().toISOString(),
     status,
@@ -503,6 +524,41 @@ function main() {
     );
   } else {
     console.log('🚫 No generated spec was created or modified.');
+  }
+
+  const reportName = `${scenarioBase}-${runId}-report`;
+  const reportBuilder = path.join(projectRoot, 'scripts', 'build-shareable-report.js');
+  const reportResult = spawnSync(
+    process.execPath,
+    [reportBuilder, reportName],
+    {
+      cwd: projectRoot,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        QA_RUN_DIR: runDir,
+        QA_RUN_ID: runId,
+        QA_SCENARIO_NAME: scenarioBase,
+        QA_SCENARIO_TYPE: scenarioType,
+        QA_LIFECYCLE_STATUS: status === 0 ? 'PASSED' : 'FAILED',
+        QA_DISCOVERY_MANIFEST: manifestPath,
+      },
+    }
+  );
+  const shareableReportPath = path.join(runDir, `${reportName}.html`);
+  manifest.shareableReportPath = fs.existsSync(shareableReportPath)
+    ? shareableReportPath
+    : null;
+  manifest.videoFiles = fs.existsSync(path.join(runDir, 'videos'))
+    ? walkFiles(path.join(runDir, 'videos')).filter(filePath => /\.(webm|mp4|mov)$/i.test(filePath))
+    : [];
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+
+  if (reportResult.status !== 0) {
+    console.warn('⚠️ Shareable report generation failed.');
+  } else {
+    console.log(`📦 Shareable report: ${shareableReportPath}`);
+    console.log(`🎥 Videos: ${manifest.videoFiles.length}`);
   }
 
   if (status === 0) {

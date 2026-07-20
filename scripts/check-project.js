@@ -3,11 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const root = path.resolve(__dirname, '..');
-const ignored = new Set(['node_modules', '.git', 'artifacts', 'reports', 'test-results', 'playwright-report']);
+const ignored = new Set(['node_modules', '.git', 'artifacts', 'reports', 'test-results', 'playwright-report', 'backups']);
 const files = [];
 function walk(dir) {
   for (const name of fs.readdirSync(dir)) {
-    if (ignored.has(name)) continue;
+    if (ignored.has(name) || name.startsWith('._') || /\.(?:bak|backup)$/.test(name)) continue;
     const full = path.join(dir, name);
     const stat = fs.statSync(full);
     if (stat.isDirectory()) walk(full); else if (name.endsWith('.js')) files.push(full);

@@ -18,12 +18,12 @@ const scenarioType =
     process.env.QA_SCENARIO_TYPE || ''
   ).toLowerCase();
 
-const outputDir =
-  path.join(
-    root,
-    'reports',
-    'shareable'
-  );
+const runDir = String(process.env.QA_RUN_DIR || '').trim()
+  ? path.resolve(process.env.QA_RUN_DIR)
+  : '';
+const outputDir = runDir
+  ? runDir
+  : path.join(root, 'reports', 'shareable');
 
 const outputPath =
   path.join(
@@ -524,7 +524,9 @@ function collectAllScreenshots(metrics) {
       .map(resolveFilePath)
       .filter(Boolean);
 
-  const scanDirectories = [
+  const scanDirectories = runDir
+    ? [runDir]
+    : [
     path.join(
       root,
       'reports',
@@ -632,6 +634,35 @@ function collectAllScreenshots(metrics) {
           filePath
         ),
     }));
+}
+
+function collectVideos() {
+  if (!runDir || !fs.existsSync(runDir)) return [];
+  const results = [];
+  const pending = [runDir];
+  while (pending.length) {
+    const current = pending.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const absolute = path.join(current, entry.name);
+      if (entry.isDirectory()) pending.push(absolute);
+      else if (entry.isFile() && /\.(webm|mp4|mov)$/i.test(entry.name)) results.push(absolute);
+    }
+  }
+  return results.sort((a, b) => fileTimestamp(a) - fileTimestamp(b));
+}
+
+function buildVideoCards(videos) {
+  if (!videos.length) return '<p>No video recording was produced for this execution.</p>';
+  return videos.map((videoPath, index) => {
+    const relative = path.relative(outputDir, videoPath).replaceAll('\\\\', '/');
+    return `
+      <figure class="shot">
+        <video controls preload="metadata" style="width:100%;max-height:620px;background:#111">
+          <source src="${escapeHtml(relative)}" type="video/${path.extname(videoPath).slice(1).toLowerCase() === 'webm' ? 'webm' : 'mp4'}">
+        </video>
+        <figcaption><strong>${index + 1}. Execution video</strong><span>${escapeHtml(path.relative(root, videoPath).replaceAll('\\\\', '/'))}</span></figcaption>
+      </figure>`;
+  }).join('');
 }
 
 function calculateTokenUsage(
@@ -981,6 +1012,7 @@ function buildVisualComparisonCards(
 
 function buildGenerativeReport() {
   const metricsCandidates = [
+    runDir ? path.join(runDir, `${scenarioName}.metrics.json`) : '',
     process.env.QA_REPORTS_DIR
       ? path.join(
           process.env.QA_REPORTS_DIR,
@@ -996,6 +1028,7 @@ function buildGenerativeReport() {
   ].filter(Boolean);
 
   const transcriptCandidates = [
+    runDir ? path.join(runDir, 'transcripts', `${scenarioName}.transcript.json`) : '',
     process.env.QA_REPORTS_DIR
       ? path.join(
           process.env.QA_REPORTS_DIR,
@@ -1076,6 +1109,16 @@ function buildGenerativeReport() {
   const totalTokens =
     tokenUsage.totalTokens;
 
+  const plannerTokens = tokenEvents
+    .filter(event => /planner/i.test(String(event.stage || event.turn || '')))
+    .reduce((sum, event) => sum + Number(event.totalTokenCount || 0), 0);
+  const judgeTokens = tokenEvents
+    .filter(event => /judge/i.test(String(event.stage || event.turn || '')))
+    .reduce((sum, event) => sum + Number(event.totalTokenCount || 0), 0);
+  const averageTokensPerCall = tokenUsage.apiCalls
+    ? Math.round(totalTokens / tokenUsage.apiCalls)
+    : 0;
+
   const frameworkStatus =
     String(
       process.env.QA_LIFECYCLE_STATUS ||
@@ -1102,6 +1145,9 @@ function buildGenerativeReport() {
       metrics
     );
 
+  const videos = collectVideos();
+  const videoCards = buildVideoCards(videos);
+
   const visualComparisons =
     Array.isArray(
       metrics.visualComparisons
@@ -1127,206 +1173,83 @@ function buildGenerativeReport() {
 
   const turns =
     validations
-      .map(
-        (
-          item,
-          index
-        ) => `
-          <article class="turn ${statusClass(
-            item.passed
-          )}">
+      .map((item, index) => {
+        const action = item.customerAction || {};
+        const customerText = item.userMessage || action.value || action.label || `${action.action || 'Action'} ${action.targetId || ''}`.trim();
+        const botText = item.botResponse || (Array.isArray(item.botMessages) ? item.botMessages.join('\n') : '') || 'No new bot message was captured for this validation.';
+        const verdict = item.goalStatus || item.detectedState || (item.passed ? 'IN_PROGRESS' : 'FAILED');
+        const evidence = Array.isArray(item.evidence) ? item.evidence : [];
+        const issues = Array.isArray(item.issues) ? item.issues : [];
+        const llm = item.llm || {};
+        const searchable = [customerText, botText, item.reason, verdict, ...evidence].join(' ').toLowerCase();
+        return `
+          <article class="turn ${statusClass(item.passed)}" data-status="${item.passed ? 'pass' : 'fail'}" data-search="${escapeHtml(searchable)}">
             <div class="turn-head">
-              <h3>
-                Conversation validation
-                ${index + 1}
-              </h3>
-
-              <span class="badge ${statusClass(
-                item.passed
-              )}">
-                ${item.passed
-                  ? 'PASS'
-                  : 'FAIL'}
-                ·
-                ${Number(
-                  item.score || 0
-                ).toFixed(2)}
-              </span>
+              <div>
+                <h3>Business checkpoint ${index + 1}</h3>
+                <p class="muted">${escapeHtml(action.scope || 'CHAT')} · ${escapeHtml(action.action || 'VALIDATE')} ${action.label ? `· ${escapeHtml(action.label)}` : ''}</p>
+              </div>
+              <span class="badge ${statusClass(item.passed)}">${escapeHtml(verdict)} · ${Number(item.score || 0).toFixed(2)}</span>
             </div>
 
-            <div class="bubble user">
-              <b>User</b>
-
-              <p>
-                ${escapeHtml(
-                  item.userMessage
-                )}
-              </p>
+            <div class="conversation-grid">
+              <div class="bubble user">
+                <b>Customer sent / selected</b>
+                <p>${escapeHtml(customerText) || '<em>No customer action text captured</em>'}</p>
+              </div>
+              <div class="bubble bot">
+                <b>${escapeHtml(botName)} response</b>
+                <p>${escapeHtml(botText).replace(/\n/g, '<br>')}</p>
+              </div>
             </div>
 
-            <div class="bubble bot">
-              <b>
-                ${escapeHtml(
-                  botName
-                )}
-              </b>
-
-              <p>
-                ${escapeHtml(
-                  item.botResponse
-                ).replace(
-                  /\n/g,
-                  '<br>'
-                )}
-              </p>
+            <div class="verdict-box ${item.passed ? 'ok' : 'bad'}">
+              <strong>${item.passed ? 'Why this was accepted' : 'Why this needs attention'}</strong>
+              <p>${escapeHtml(item.reason || item.summary || 'No judge explanation was recorded.')}</p>
             </div>
 
             <div class="judge-grid">
-              <div>
-                <span>
-                  Intent matched
-                </span>
-
-                <strong>
-                  ${item.intentMatched === false
-                    ? 'No'
-                    : 'Yes'}
-                </strong>
-              </div>
-
-              <div>
-                <span>Safe</span>
-
-                <strong>
-                  ${item.safe === false
-                    ? 'No'
-                    : 'Yes'}
-                </strong>
-              </div>
-
-              <div>
-                <span>
-                  Detected state
-                </span>
-
-                <strong>
-                  ${escapeHtml(
-                    item.detectedState ||
-                    '-'
-                  )}
-                </strong>
-              </div>
-
-              <div>
-                <span>
-                  Judge mode
-                </span>
-
-                <strong>
-                  ${escapeHtml(
-                    item.judgeMode ||
-                    'llm'
-                  )}
-                </strong>
-              </div>
+              <div><span>Expected progress</span><strong>${escapeHtml(item.expectedIntent || '-')}</strong></div>
+              <div><span>Progress made</span><strong>${item.madeProgress === false ? 'No' : 'Yes'}</strong></div>
+              <div><span>Scenario complete</span><strong>${item.complete ? 'Yes' : 'No'}</strong></div>
             </div>
 
-            <p class="summary">
-              ${escapeHtml(
-                item.summary || ''
-              )}
-            </p>
+            ${evidence.length ? `<details open><summary>Evidence used by the judge</summary><ul>${evidence.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul></details>` : '<p class="muted">No explicit evidence list was recorded.</p>'}
+            ${issues.length ? `<details open><summary>Issues</summary><ul>${issues.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul></details>` : ''}
 
-            ${
-              item.evidence?.length
-                ? `
-                    <details>
-                      <summary>
-                        Evidence
-                      </summary>
-
-                      <ul>
-                        ${item.evidence
-                          .map(
-                            value =>
-                              `<li>${escapeHtml(
-                                value
-                              )}</li>`
-                          )
-                          .join('')}
-                      </ul>
-                    </details>
-                  `
-                : ''
-            }
-
-            ${
-              item.issues?.length
-                ? `
-                    <details open>
-                      <summary>
-                        Issues
-                      </summary>
-
-                      <ul>
-                        ${item.issues
-                          .map(
-                            value =>
-                              `<li>${escapeHtml(
-                                value
-                              )}</li>`
-                          )
-                          .join('')}
-                      </ul>
-                    </details>
-                  `
-                : ''
-            }
-          </article>
-        `
-      )
-      .join('\n') ||
-    `
-      <section class="panel">
-        <h2>
-          No generative validations found
-        </h2>
-
-        <p>
-          No LLM-judge validation records were present.
-          Application status is shown as UNKNOWN rather than FAIL.
-        </p>
-      </section>
-    `;
+            <details>
+              <summary>Technical details: state delta and LLM request/response</summary>
+              <h4>State settling evidence</h4>
+              <pre>${escapeHtml(JSON.stringify(item.settleEvidence || {}, null, 2))}</pre>
+              <h4>State changes</h4>
+              <pre>${escapeHtml(JSON.stringify(item.stateDelta || {}, null, 2))}</pre>
+              <h4>Data sent to the judge</h4>
+              <pre>${escapeHtml(llm.requestPayload || 'Not recorded')}</pre>
+              <h4>Raw judge response</h4>
+              <pre>${escapeHtml(llm.responsePayload || 'Not recorded')}</pre>
+            </details>
+          </article>`;
+      })
+      .join('\n') || `
+        <section class="panel">
+          <h2>No generative validations found</h2>
+          <p>No LLM-judge validation records were present. Application status is UNKNOWN.</p>
+        </section>`;
 
   const tokenRows =
     tokenEvents
       .map(
         event => `
-          <tr>
-            <td>
-              ${escapeHtml(
-                event.turn
-              )}
-            </td>
-
-            <td>
-              ${shortNumber(
-                event.promptTokenCount
-              )}
-            </td>
-
-            <td>
-              ${shortNumber(
-                event.candidatesTokenCount
-              )}
-            </td>
-
-            <td>
-              ${shortNumber(
-                event.totalTokenCount
-              )}
-            </td>
+          <tr data-token-stage="${escapeHtml(String(event.stage || event.turn || 'LLM').toLowerCase())}">
+            <td>${escapeHtml(event.stage || event.turn || 'LLM')}</td>
+            <td>${escapeHtml(event.turn ?? '-')}</td>
+            <td>${escapeHtml(event.model || metrics.model || '-')}</td>
+            <td>${Number(event.temperature ?? metrics.llmTemperature ?? 0).toFixed(2)}</td>
+            <td>${shortNumber(event.promptTokenCount)}</td>
+            <td>${shortNumber(event.candidatesTokenCount)}</td>
+            <td>${shortNumber(event.cachedContentTokenCount)}</td>
+            <td>${shortNumber(event.totalTokenCount)}</td>
+            <td>${escapeHtml(event.finishReason || '-')}</td>
           </tr>
         `
       )
@@ -1583,6 +1506,21 @@ function buildGenerativeReport() {
       font-weight: 650;
     }
 
+    .muted { color: var(--muted); margin: 4px 0; }
+    .conversation-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .verdict-box { margin:14px 0; padding:14px 16px; border-radius:12px; border-left:5px solid var(--info); background:#eff6ff; }
+    .verdict-box.ok { border-left-color:var(--pass); background:#f0fdf4; }
+    .verdict-box.bad { border-left-color:var(--fail); background:#fef2f2; }
+    .dark .verdict-box { background:#172033; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:10px; margin:18px 0; }
+    .toolbar input, .toolbar select, .toolbar button { padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:var(--panel); color:var(--text); }
+    .toolbar input { min-width:300px; flex:1; }
+    .token-bar { height:12px; border-radius:999px; overflow:hidden; display:flex; background:var(--border); margin:12px 0 4px; }
+    .token-bar .planner { background:#2563eb; }
+    .token-bar .judge { background:#7c3aed; }
+    details { margin-top:12px; }
+    summary { cursor:pointer; font-weight:700; }
+
     .tokens {
       width: 100%;
       border-collapse: collapse;
@@ -1694,9 +1632,9 @@ function buildGenerativeReport() {
       }
 
       .shots,
-      .visual-images {
-        grid-template-columns:
-          1fr;
+      .visual-images,
+      .conversation-grid {
+        grid-template-columns: 1fr;
       }
 
       .hero-inner {
@@ -1834,6 +1772,11 @@ function buildGenerativeReport() {
       </div>
 
       <div class="card">
+        <span>Videos</span>
+        <strong>${videos.length}</strong>
+      </div>
+
+      <div class="card">
         <span>Total tokens</span>
 
         <strong>
@@ -1844,84 +1787,31 @@ function buildGenerativeReport() {
       </div>
     </section>
 
-    ${turns}
+    <section class="panel">
+      <h2>Conversation and validation journey</h2>
+      <p>Each checkpoint shows what the customer sent or selected, what ${escapeHtml(botName)} returned, and why the judge accepted or rejected the response.</p>
+      <div class="toolbar">
+        <input id="turnSearch" type="search" placeholder="Search customer messages, bot responses or evidence..." oninput="filterTurns()">
+        <select id="statusFilter" onchange="filterTurns()">
+          <option value="all">All checkpoints</option>
+          <option value="pass">Passed / in progress</option>
+          <option value="fail">Failed</option>
+        </select>
+        <button onclick="toggleTechnical()">Expand / collapse technical details</button>
+      </div>
+    </section>
+
+    <div id="turnsContainer">${turns}</div>
+
+    <section class="panel token-total-footer">
+      <h2>Total LLM usage</h2>
+      <p class="muted">Combined Gemini usage for the complete run. Per-request token details are retained in the metrics JSON but intentionally hidden from this business report.</p>
+      <div class="total-token-value">${shortNumber(totalTokens)} tokens</div>
+    </section>
 
     <section class="panel">
-      <h2>Token usage</h2>
-
-      <div class="judge-grid">
-        <div>
-          <span>
-            Prompt tokens
-          </span>
-
-          <strong>
-            ${shortNumber(
-              tokenUsage.promptTokens
-            )}
-          </strong>
-        </div>
-
-        <div>
-          <span>
-            Output tokens
-          </span>
-
-          <strong>
-            ${shortNumber(
-              tokenUsage.outputTokens
-            )}
-          </strong>
-        </div>
-
-        <div>
-          <span>
-            Peak request size
-          </span>
-
-          <strong>
-            ${shortNumber(
-              tokenUsage.peakRequestTokens
-            )}
-          </strong>
-        </div>
-
-        <div>
-          <span>
-            Gemini API calls
-          </span>
-
-          <strong>
-            ${shortNumber(
-              tokenUsage.apiCalls
-            )}
-          </strong>
-        </div>
-      </div>
-
-      <table class="tokens">
-        <thead>
-          <tr>
-            <th>Stage</th>
-            <th>Prompt</th>
-            <th>Output</th>
-            <th>Total</th>
-          </tr>
-        </thead>
-
-        <tbody>
-          ${
-            tokenRows ||
-            `
-              <tr>
-                <td colspan="4">
-                  No token events found.
-                </td>
-              </tr>
-            `
-          }
-        </tbody>
-      </table>
+      <h2>Video recording (${videos.length})</h2>
+      <div class="shots">${videoCards}</div>
     </section>
 
     <section class="panel">
@@ -1989,6 +1879,22 @@ function buildGenerativeReport() {
       </details>
     </section>
   </main>
+  <script>
+    function filterTurns() {
+      const query = (document.getElementById('turnSearch')?.value || '').toLowerCase();
+      const status = document.getElementById('statusFilter')?.value || 'all';
+      document.querySelectorAll('#turnsContainer .turn').forEach(card => {
+        const matchesText = !query || (card.dataset.search || '').includes(query);
+        const matchesStatus = status === 'all' || card.dataset.status === status;
+        card.style.display = matchesText && matchesStatus ? '' : 'none';
+      });
+    }
+    function toggleTechnical() {
+      const details = [...document.querySelectorAll('#turnsContainer details')];
+      const shouldOpen = details.some(item => !item.open);
+      details.forEach(item => { item.open = shouldOpen; });
+    }
+  </script>
 </body>
 </html>
 `;
@@ -2008,14 +1914,19 @@ function buildGenerativeReport() {
   );
 
   console.log(
+    `Videos included: ${videos.length}`
+  );
+
+  console.log(
     `Visual comparisons included: ${visualComparisons.length}`
   );
 }
 
-if (
-  scenarioType ===
-  'generative'
-) {
+const inferredGenerative = scenarioType === 'generative' || Boolean(
+  readJson(runDir ? path.join(runDir, `${scenarioName}.metrics.json`) : '')?.judgements
+);
+
+if (inferredGenerative) {
   buildGenerativeReport();
 } else {
   const legacy =

@@ -78,95 +78,49 @@ function validateGeneratedSpec(filePath, options = {}) {
     }
   }
 
-  if (
-    platform === 'web' &&
-    testType === 'generative'
-  ) {
-    const runConversationCall =
-      code.match(
-        /runConversationTurns\s*\(\s*\{([\s\S]*?)\}\s*\)/
-      );
-
-    if (!runConversationCall) {
-      errors.push(
-        'Generative web spec must call runConversationTurns with an options object.'
-      );
-    } else {
-      const options = runConversationCall[1];
-
-      if (!/\bturns\s*,|\bturns\s*:/.test(options)) {
-        errors.push(
-          'runConversationTurns requires a turns array.'
-        );
-      }
-
-      if (!/\bsendAndJudge\s*:/.test(options)) {
-        errors.push(
-          'runConversationTurns requires a sendAndJudge callback.'
-        );
-      }
+  if (testType === 'generative') {
+    if (!/\.runGeneratedJourney\s*\(/.test(code)) {
+      errors.push('Generated generative spec must execute deterministic-first steps through runGeneratedJourney().');
     }
-
-    const unsupportedTurnRunnerOptions = [
-      'initialTurn',
-      'customerPersona',
-      'conversationStrategy',
-      'expectations',
-      'allowedIntermediateStates',
-      'failureConditions',
-      'stopConditions',
-      'generateFollowUp',
-      'validateBotResponse',
-    ];
-
-    for (const option of unsupportedTurnRunnerOptions) {
-      const pattern =
-        new RegExp(`\\b${option}\\s*:`);
-
-      if (pattern.test(code)) {
-        errors.push(
-          `${option} is not supported by runConversationTurns.`
-        );
-      }
+    if (!/semanticContract|scenario\s*:/.test(code)) {
+      errors.push('Generative spec must provide a semantic scenario contract.');
+    }
+    if (/runConversationTurns\s*\(|\.runSemanticJourney\s*\(/.test(code)) {
+      errors.push('Generated generative specs must not replay discovered turns or invoke the discovery semantic loop.');
+    }
+    if (/milestones\s*:\s*\[\s*['"]/s.test(code)) {
+      errors.push('Generated generative specs must use typed milestone objects, not milestone strings.');
+    }
+    if (/targetId\s*:\s*['"]control_\d+|getByText\s*\(\s*['"][^'"]+['"]\s*\)/.test(code)) {
+      errors.push('Generative specs must not hardcode runtime control IDs or bot chip wording.');
     }
   }
 
-  if (
-    platform === 'web' &&
-    testType === 'generative'
-  ) {
-    if (
-      !/const\s*\{\s*OliveWebBot\s*\}\s*=\s*require\(['"]\.\.\/\.\.\/src\/oliveWebBot['"]\)/.test(code)
-    ) {
-      errors.push(
-        'Generative web spec must destructure OliveWebBot from ../../src/oliveWebBot.'
-      );
+  if (platform === 'web' && testType === 'generative') {
+    if (!/const\s*\{\s*OliveWebBot\s*\}\s*=\s*require\(['"]\.\.\/\.\.\/src\/oliveWebBot['"]\)/.test(code)) {
+      errors.push('Generative web spec must import OliveWebBot from ../../src/oliveWebBot.');
     }
-
-    if (/new\s+OliveWebBot\s*\(\s*page\s*,/.test(code)) {
-      errors.push(
-        'OliveWebBot constructor accepts page only; do not pass testInfo.'
-      );
+    if (!/new\s+OliveWebBot\s*\(\s*page\s*\)/.test(code)) {
+      errors.push('Generative web spec must instantiate new OliveWebBot(page).');
     }
-
-    if (/\.openChatbot\s*\(/.test(code)) {
-      errors.push(
-        'openChatbot() is not a valid API; use bot.open().'
-      );
+    if (!/\.ensureAuthenticated\s*\(\s*\{[^}]*targetUrl[^}]*required\s*:\s*true/s.test(code)) {
+      errors.push('Generated web spec must restore deterministic authentication before chatbot execution.');
     }
-
-    if (
-      !/new\s+OliveWebBot\s*\(\s*page\s*\)/.test(code)
-    ) {
-      errors.push(
-        'Generative web spec must instantiate new OliveWebBot(page).'
-      );
+    if (!/\.open\s*\(/.test(code)) {
+      errors.push('Generated web spec must explicitly open the chatbot before executing generated steps.');
     }
+  }
 
-    if (!/await\s+bot\.open\s*\(\s*\)/.test(code)) {
-      errors.push(
-        'Generative web spec must open the chatbot using await bot.open().'
-      );
+  if (platform === 'mobile' && testType === 'generative') {
+    if (!/OliveMobileBot/.test(code)) errors.push('Generative mobile spec must use OliveMobileBot.');
+    if (!/new\s+OliveMobileBot\s*\(\s*browser\s*\)/.test(code)) {
+      errors.push('Generative mobile spec must instantiate new OliveMobileBot(browser).');
+    }
+    if (!/\.ensureAuthenticated\s*\(\s*\{[^}]*required\s*:\s*true/s.test(code)) {
+      errors.push('Generated mobile spec must establish or verify deterministic authenticated app state.');
+    }
+    if (!/\.open\s*\(/.test(code)) {
+      errors.push('Generated mobile spec must explicitly open the chatbot before executing generated steps.');
     }
   }
 
@@ -179,7 +133,7 @@ function validateGeneratedSpec(filePath, options = {}) {
   }
 
   if (testType === 'generative') {
-    if (!/judgeChatbotResponse|sendAndJudge|runConversationTurns/.test(code)) errors.push('Generative spec must include semantic LLM judging.');
+    if (!/runGeneratedJourney/.test(code)) errors.push('Generated generative spec must use the deterministic-first shared runtime.');
     if (!/OliveWebBot|OliveMobileBot/.test(code)) errors.push('Generative spec must use the Olive platform helper.');
   }
 
