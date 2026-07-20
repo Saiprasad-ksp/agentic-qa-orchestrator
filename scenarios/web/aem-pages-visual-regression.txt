@@ -1,0 +1,43 @@
+TAGS: @web @aem @visual @regression
+PLATFORM: Web
+TEST_TYPE: Deterministic
+GENERATE_SPEC: false
+SCENARIO: AEM pages visual regression
+PAGE: AEM Help pages
+
+GOAL:
+Validate the listed Woolworths AEM Help pages using the existing Playwright visual-regression tools. Use the environment base URL from TARGET_ENV. Do not hardcode UAT or PROD inside generated specs.
+
+ENVIRONMENT URL RULE:
+UAT base URL: https://uatsite.woolworths.com.au
+PROD base URL: https://www.woolworths.com.au
+Append each path below to the selected environment base URL.
+
+VISUAL REGRESSION RULES:
+For every page below, perform these exact actions in order:
+1. Call pw_navigate with the resolved environment URL.
+2. Wait for the existing page-stability behaviour.
+3. Call pw_take_screenshot using the supplied evidence name.
+4. Call pw_visual_snapshot using the supplied visual name and updateBaseline=false. A missing baseline may be created by the existing visual validator.
+5. Call pw_compare_visual using the same visual name.
+6. Continue to the next page even when a visual mismatch is found, while retaining the mismatch as report evidence.
+7. Keep UAT and PROD baselines separate using the existing environment-aware visual paths.
+
+PAGES:
+- Smart Basket | /shop/help/smart-basket | aem_smart_basket
+- Recipe Cost per serve FAQs | /shop/help/recipe-cost-per-serve-faqs | aem_recipe_cost_per_serve_faqs
+- Scam Alert | /shop/help/scam-alert | aem_scam_alert
+- User Manuals | /shop/help/user-manuals | aem_user_manuals
+- Product recalls | /shop/help/product-recalls | aem_product_recalls
+- Returns Policy | /shop/help/returns-policy | aem_returns_policy
+- Liquor & Tobacco Notices | /shop/help/liquor-purchase-notices | aem_liquor_purchase_notices
+- Collection Notice | /shop/help/collection-notice | aem_collection_notice
+- Product Safety | /shop/help/product-safety | aem_product_safety
+- Latest News | /shop/help/latest-news | aem_latest_news
+- Accessibility | /shop/help/accessibility | aem_accessibility
+- Raincheck | /shop/help/raincheck | aem_raincheck
+- Liquor and Tobacco Licensing | /shop/help/tobacco-and-liquor-licences | aem_tobacco_and_liquor_licences
+- Country of Origin | /shop/help/country-of-origin | aem_country_of_origin
+
+REPORTING:
+Use the existing report, screenshot, video, trace, baseline, actual, diff and overlay implementation without replacing or bypassing it.
