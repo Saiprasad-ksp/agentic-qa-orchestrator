@@ -494,44 +494,34 @@ jobs:
             echo "Scenario does not require deterministic login."
           fi
 
-      - name: Validate deterministic login credentials
+      - name: Load deterministic login credentials
         if: ${{ inputs.run_mode == 'scenario' }}
+        env:
+          OLIVE_CREDENTIALS: ${{ secrets.OLIVECREDS }}
         run: |
           set -euo pipefail
 
           if [[ "${QA_AUTH_REQUIRED:-false}" != "true" ]]; then
-            echo "Skipping login credential validation."
+            echo "Skipping deterministic login credential loading."
             exit 0
           fi
 
+          if [[ -z "${OLIVE_CREDENTIALS:-}" ]]; then
+            echo "::error::GitHub repository secret OLIVECREDS is missing or empty."
+            exit 1
+          fi
+
+          mkdir -p "$AGENTIC_QA_CREDENTIALS_DIR"
+
           LOGIN_FILE="$AGENTIC_QA_CREDENTIALS_DIR/login.env"
 
-          # GitHub Secrets take priority. Use login.env only for values that
-          # are missing from the workflow environment on a self-hosted runner.
-          SECRET_LOGIN_URL_UAT="${LOGIN_URL_UAT:-}"
-          SECRET_LOGIN_URL_PROD="${LOGIN_URL_PROD:-}"
-          SECRET_TEST_LOGIN_EMAIL="${TEST_LOGIN_EMAIL:-}"
-          SECRET_TEST_LOGIN_PASSWORD="${TEST_LOGIN_PASSWORD:-}"
-          SECRET_URL_UAT="${URL_UAT:-}"
-          SECRET_URL_PROD="${URL_PROD:-}"
+          printf '%s\n' "$OLIVE_CREDENTIALS" > "$LOGIN_FILE"
+          chmod 600 "$LOGIN_FILE"
 
-          if [[ -f "$LOGIN_FILE" ]]; then
-            echo "Optional local login.env found; loading only missing values."
-
-            set -a
-            # shellcheck disable=SC1090
-            source "$LOGIN_FILE"
-            set +a
-
-            [[ -n "$SECRET_LOGIN_URL_UAT" ]] && LOGIN_URL_UAT="$SECRET_LOGIN_URL_UAT"
-            [[ -n "$SECRET_LOGIN_URL_PROD" ]] && LOGIN_URL_PROD="$SECRET_LOGIN_URL_PROD"
-            [[ -n "$SECRET_TEST_LOGIN_EMAIL" ]] && TEST_LOGIN_EMAIL="$SECRET_TEST_LOGIN_EMAIL"
-            [[ -n "$SECRET_TEST_LOGIN_PASSWORD" ]] && TEST_LOGIN_PASSWORD="$SECRET_TEST_LOGIN_PASSWORD"
-            [[ -n "$SECRET_URL_UAT" ]] && URL_UAT="$SECRET_URL_UAT"
-            [[ -n "$SECRET_URL_PROD" ]] && URL_PROD="$SECRET_URL_PROD"
-          else
-            echo "No local login.env found; using GitHub Actions secrets."
-          fi
+          set -a
+          # shellcheck disable=SC1090
+          source "$LOGIN_FILE"
+          set +a
 
           case "${TARGET_ENV^^}" in
             UAT)
@@ -569,117 +559,9 @@ jobs:
           done
 
           if (( ${#MISSING_VARIABLES[@]} > 0 )); then
-            echo "::error::Missing deterministic-login secrets: ${MISSING_VARIABLES[*]}"
+            echo "::error::Missing variables in OLIVECREDS: ${MISSING_VARIABLES[*]}"
             exit 1
           fi
-
-          # Persist only values loaded from the optional local fallback.
-          if [[ -z "$SECRET_LOGIN_URL_UAT" && -n "${LOGIN_URL_UAT:-}" ]]; then
-            echo "LOGIN_URL_UAT=$LOGIN_URL_UAT" >> "$GITHUB_ENV"
-          fi
-          if [[ -z "$SECRET_LOGIN_URL_PROD" && -n "${LOGIN_URL_PROD:-}" ]]; then
-            echo "LOGIN_URL_PROD=$LOGIN_URL_PROD" >> "$GITHUB_ENV"
-          fi
-          if [[ -z "$SECRET_TEST_LOGIN_EMAIL" && -n "${TEST_LOGIN_EMAIL:-}" ]]; then
-            echo "TEST_LOGIN_EMAIL=$TEST_LOGIN_EMAIL" >> "$GITHUB_ENV"
-          fi
-          if [[ -z "$SECRET_TEST_LOGIN_PASSWORD" && -n "${TEST_LOGIN_PASSWORD:-}" ]]; then
-            echo "TEST_LOGIN_PASSWORD=$TEST_LOGIN_PASSWORD" >> "$GITHUB_ENV"
-          fi
-          if [[ -z "$SECRET_URL_UAT" && -n "${URL_UAT:-}" ]]; then
-            echo "URL_UAT=$URL_UAT" >> "$GITHUB_ENV"
-          fi
-          if [[ -z "$SECRET_URL_PROD" && -n "${URL_PROD:-}" ]]; then
-            echo "URL_PROD=$URL_PROD" >> "$GITHUB_ENV"
-          fi
-
-          if [[ "${TARGET_ENV^^}" == "UAT" ]]; then
-            echo "WEB_BASE_URL=$URL_UAT" >> "$GITHUB_ENV"
-            echo "BASE_URL=$URL_UAT" >> "$GITHUB_ENV"
-          else
-            echo "WEB_BASE_URL=$URL_PROD" >> "$GITHUB_ENV"
-            echo "BASE_URL=$URL_PROD" >> "$GITHUB_ENV"
-          fi
-
-          echo "Deterministic login configuration is available for $TARGET_ENV."
-
-      - name: Create deterministic login credentials
-        if: ${{ inputs.run_mode == 'scenario' }}
-        env:
-          OLIVE_CREDENTIALS: ${{ secrets.OLIVECREDS }}
-        run: |
-          set -euo pipefail
-
-          if [[ "${QA_AUTH_REQUIRED:-false}" != "true" ]]; then
-            echo "Deterministic login is not required."
-            exit 0
-          fi
-
-          if [[ -z "${OLIVE_CREDENTIALS:-}" ]]; then
-            echo "::error::Repository secret OLIVECREDS is missing or empty."
-            exit 1
-          fi
-
-          mkdir -p "$AGENTIC_QA_CREDENTIALS_DIR"
-
-          printf '%s\n' "$OLIVE_CREDENTIALS" \
-            > "$AGENTIC_QA_CREDENTIALS_DIR/login.env"
-
-          chmod 600 "$AGENTIC_QA_CREDENTIALS_DIR/login.env"
-
-          echo "Deterministic login credentials created from OLIVECREDS."
-
-      - name: Load deterministic login credentials
-        if: ${{ inputs.run_mode == 'scenario' }}
-        run: |
-          set -euo pipefail
-
-          if [[ "${QA_AUTH_REQUIRED:-false}" != "true" ]]; then
-            echo "Skipping deterministic login credentials."
-            exit 0
-          fi
-
-          LOGIN_FILE="$AGENTIC_QA_CREDENTIALS_DIR/login.env"
-
-          if [[ ! -f "$LOGIN_FILE" ]]; then
-            echo "::error::Login credentials file was not created."
-            exit 1
-          fi
-
-          set -a
-          # shellcheck disable=SC1090
-          source "$LOGIN_FILE"
-          set +a
-
-          case "${TARGET_ENV^^}" in
-            UAT)
-              REQUIRED_LOGIN_URL="LOGIN_URL_UAT"
-              ;;
-            PROD)
-              REQUIRED_LOGIN_URL="LOGIN_URL_PROD"
-              ;;
-            *)
-              echo "::error::Unsupported TARGET_ENV: $TARGET_ENV"
-              exit 1
-              ;;
-          esac
-
-          REQUIRED_VARIABLES=(
-            "$REQUIRED_LOGIN_URL"
-            TEST_LOGIN_EMAIL
-            TEST_LOGIN_PASSWORD
-          )
-
-          for VARIABLE_NAME in "${REQUIRED_VARIABLES[@]}"; do
-            VARIABLE_VALUE="${!VARIABLE_NAME:-}"
-
-            if [[ -z "$VARIABLE_VALUE" ]]; then
-              echo "::error::$VARIABLE_NAME is missing from OLIVECREDS."
-              exit 1
-            fi
-
-            echo "::add-mask::$VARIABLE_VALUE"
-          done
 
           {
             echo "LOGIN_URL_UAT=${LOGIN_URL_UAT:-}"
@@ -687,9 +569,18 @@ jobs:
             echo "TEST_LOGIN_EMAIL=$TEST_LOGIN_EMAIL"
             echo "TEST_LOGIN_PASSWORD=$TEST_LOGIN_PASSWORD"
             echo "URL_UAT=${URL_UAT:-}"
+            echo "URL_PROD=${URL_PROD:-}"
+
+            if [[ "${TARGET_ENV^^}" == "PROD" ]]; then
+              echo "WEB_BASE_URL=$URL_PROD"
+              echo "BASE_URL=$URL_PROD"
+            else
+              echo "WEB_BASE_URL=$URL_UAT"
+              echo "BASE_URL=$URL_UAT"
+            fi
           } >> "$GITHUB_ENV"
 
-          echo "Deterministic login credentials loaded for $TARGET_ENV."
+          echo "Deterministic login credentials loaded successfully for $TARGET_ENV."
 
       - name: Prepare deterministic authenticated state
         if: ${{ inputs.run_mode == 'scenario' }}
