@@ -309,9 +309,16 @@ async function main() {
           Date.now() + timeout;
 
         const buttonSelector = [
-          'button[data-action-button-primary="true"]:not([aria-hidden="true"]):not(.ulp-hidden-form-submit-button)',
-          'button[type="submit"]:not([aria-hidden="true"]):not(.ulp-hidden-form-submit-button)',
+          'button[data-action-button-primary="true"]',
+          'button[type="submit"]',
+          'input[type="submit"]',
+          '[role="button"]',
         ].join(', ');
+
+        const acceptedLabelPattern =
+          /^(?:log\s*in|continue)$/i;
+
+        let lastDiagnostics = [];
 
         while (Date.now() < deadline) {
           const candidates =
@@ -319,6 +326,8 @@ async function main() {
 
           const count =
             await candidates.count();
+
+          lastDiagnostics = [];
 
           for (
             let index = 0;
@@ -329,12 +338,45 @@ async function main() {
               candidates.nth(index);
 
             try {
-              const label =
-                String(
-                  await candidate.innerText()
-                )
-                  .replace(/\s+/g, ' ')
-                  .trim();
+              const details =
+                await candidate.evaluate(
+                  element => ({
+                    text:
+                      String(
+                        element.innerText ||
+                        element.textContent ||
+                        ''
+                      )
+                        .replace(/\s+/g, ' ')
+                        .trim(),
+
+                    value:
+                      String(
+                        element.value || ''
+                      )
+                        .replace(/\s+/g, ' ')
+                        .trim(),
+
+                    ariaLabel:
+                      String(
+                        element.getAttribute(
+                          'aria-label'
+                        ) || ''
+                      )
+                        .replace(/\s+/g, ' ')
+                        .trim(),
+
+                    ariaHidden:
+                      element.getAttribute(
+                        'aria-hidden'
+                      ),
+
+                    className:
+                      String(
+                        element.className || ''
+                      ),
+                  })
+                );
 
               const visible =
                 await candidate.isVisible();
@@ -342,24 +384,63 @@ async function main() {
               const enabled =
                 await candidate.isEnabled();
 
+              const labels = [
+                details.text,
+                details.value,
+                details.ariaLabel,
+              ].filter(Boolean);
+
+              const hiddenAuth0Button =
+                details.ariaHidden === 'true' ||
+                details.className.includes(
+                  'ulp-hidden-form-submit-button'
+                );
+
+              lastDiagnostics.push({
+                index,
+                labels,
+                visible,
+                enabled,
+                ariaHidden:
+                  details.ariaHidden,
+                className:
+                  details.className,
+              });
+
               if (
-                /^log in$/i.test(label) &&
                 visible &&
-                enabled
+                enabled &&
+                !hiddenAuth0Button &&
+                labels.some(label =>
+                  acceptedLabelPattern.test(label)
+                )
               ) {
                 console.log(
-                  `Using visible Log in button ${index + 1}/${count}.`
+                  [
+                    'Using visible login control',
+                    `${index + 1}/${count}:`,
+                    labels.join(' | '),
+                  ].join(' ')
                 );
 
                 return candidate;
               }
             } catch (_error) {
-              // Auth0 may rerender the form while switching stages.
+              // Auth0 may rerender while changing stages.
             }
           }
 
           await page.waitForTimeout(250);
         }
+
+        console.log(
+          'Login controls at timeout:',
+          JSON.stringify(
+            lastDiagnostics,
+            null,
+            2
+          )
+        );
 
         return null;
       }
