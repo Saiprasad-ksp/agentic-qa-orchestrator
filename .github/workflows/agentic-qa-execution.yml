@@ -504,7 +504,9 @@ jobs:
             exit 0
           fi
 
-          case "${TARGET_ENV^^}" in
+          TARGET_ENV_UPPER="$(printf '%s' "$TARGET_ENV" | tr '[:lower:]' '[:upper:]')"
+
+          case "$TARGET_ENV_UPPER" in
             UAT)
               REQUIRED_LOGIN_URL_VARIABLE="LOGIN_URL_UAT"
               REQUIRED_TARGET_URL_VARIABLE="URL_UAT"
