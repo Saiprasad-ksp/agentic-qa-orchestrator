@@ -546,6 +546,34 @@ jobs:
 
           echo "Deterministic login secrets are available for $TARGET_ENV."
 
+      - name: Prepare protected login credentials file
+        if: ${{ inputs.run_mode == 'scenario' }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${QA_AUTH_REQUIRED:-false}" != "true" ]]; then
+            echo "Deterministic login is not required."
+            exit 0
+          fi
+
+          mkdir -p "$AGENTIC_QA_CREDENTIALS_DIR"
+          LOGIN_FILE="$AGENTIC_QA_CREDENTIALS_DIR/login.env"
+
+          {
+            printf 'LOGIN_URL_UAT=%s\n' "$LOGIN_URL_UAT"
+            printf 'LOGIN_URL_PROD=%s\n' "$LOGIN_URL_PROD"
+            printf 'TEST_LOGIN_EMAIL=%s\n' "$TEST_LOGIN_EMAIL"
+            printf 'TEST_LOGIN_PASSWORD=%s\n' "$TEST_LOGIN_PASSWORD"
+            printf 'URL_UAT=%s\n' "$URL_UAT"
+            printf 'URL_PROD=%s\n' "$URL_PROD"
+          } > "$LOGIN_FILE"
+
+          chmod 600 "$LOGIN_FILE"
+
+          echo "::add-mask::$TEST_LOGIN_EMAIL"
+          echo "::add-mask::$TEST_LOGIN_PASSWORD"
+          echo "Protected deterministic login file created."
+
       - name: Prepare deterministic authenticated state
         if: ${{ inputs.run_mode == 'scenario' }}
         run: |
