@@ -35,16 +35,10 @@ let browser = null;
 let browserContext = null;
 let page = null;
 let olive = null;
-let pageRuntimeElements = new Map();
-let pageRuntimeSequence = 0;
 
 const rootDir = __dirname;
-const defaultReportsDir = path.resolve(rootDir, 'reports');
-const reportsDir = String(process.env.QA_RUN_DIR || '').trim()
-  ? path.resolve(process.env.QA_RUN_DIR)
-  : defaultReportsDir;
+const reportsDir = path.resolve(rootDir, 'reports');
 const screenshotsDir = path.resolve(reportsDir, 'screenshots');
-const videosDir = path.resolve(reportsDir, 'videos');
 const baselineDir = path.resolve(rootDir, 'visual-baselines');
 const actualDir = path.resolve(rootDir, 'visual-actuals');
 const diffDir = path.resolve(rootDir, 'visual-diffs');
@@ -56,7 +50,7 @@ const server = new Server(
 );
 
 function ensureDirs() {
-  for (const dir of [reportsDir, screenshotsDir, videosDir, baselineDir, actualDir, diffDir, auditDir]) {
+  for (const dir of [reportsDir, screenshotsDir, baselineDir, actualDir, diffDir, auditDir]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 }
@@ -114,473 +108,6 @@ async function createBrowser() {
   });
 }
 
-
-function loadDeterministicCredentials() {
-  const credentialsPath = path.resolve(
-    rootDir,
-    process.env.AGENTIC_QA_CREDENTIALS_DIR || '.credentials',
-    'login.env'
-  );
-
-  if (!fs.existsSync(credentialsPath)) {
-    throw new Error(
-      `Deterministic login credentials were not found: ${credentialsPath}`
-    );
-  }
-
-  const allowedKeys = new Set([
-    'LOGIN_URL_UAT',
-    'LOGIN_URL_PROD',
-    'TEST_LOGIN_EMAIL',
-    'TEST_LOGIN_PASSWORD',
-  ]);
-
-  const lines = fs
-    .readFileSync(credentialsPath, 'utf8')
-    .replace(/\r/g, '')
-    .split('\n');
-
-  for (const originalLine of lines) {
-    let line = originalLine.trim();
-
-    if (!line || line.startsWith('#')) {
-      continue;
-    }
-
-    line = line.replace(/^export\s+/, '');
-
-    const equalsIndex = line.indexOf('=');
-
-    if (equalsIndex <= 0) {
-      continue;
-    }
-
-    const key = line.slice(0, equalsIndex).trim();
-
-    if (!allowedKeys.has(key)) {
-      continue;
-    }
-
-    let value = line.slice(equalsIndex + 1).trim();
-
-    if (
-      value.length >= 2 &&
-      (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      )
-    ) {
-      value = value.slice(1, -1);
-    }
-
-    process.env[key] = value;
-  }
-
-  const targetEnv = String(
-    process.env.TARGET_ENV || 'UAT'
-  ).toUpperCase();
-
-  const loginUrl =
-    targetEnv === 'PROD'
-      ? process.env.LOGIN_URL_PROD
-      : process.env.LOGIN_URL_UAT;
-
-  const email = process.env.TEST_LOGIN_EMAIL;
-  const password = process.env.TEST_LOGIN_PASSWORD;
-
-  if (!loginUrl || !email || !password) {
-    throw new Error(
-      `Deterministic login configuration is incomplete for ${targetEnv}.`
-    );
-  }
-
-  return {
-    loginUrl,
-    email,
-    password,
-  };
-}
-
-async function findVisibleLoginButton(
-  activePage,
-  timeout = 30000
-) {
-  const deadline =
-    Date.now() + timeout;
-
-  const selector = [
-    'button[data-action-button-primary="true"]:not([aria-hidden="true"]):not(.ulp-hidden-form-submit-button)',
-    'button[type="submit"]:not([aria-hidden="true"]):not(.ulp-hidden-form-submit-button)',
-  ].join(', ');
-
-  let lastCandidateSummary = [];
-
-  while (Date.now() < deadline) {
-    const candidates =
-      activePage.locator(selector);
-
-    const count =
-      await candidates.count();
-
-    let visibleFallback = null;
-    const candidateSummary = [];
-
-    for (
-      let index = 0;
-      index < count;
-      index += 1
-    ) {
-      const candidate =
-        candidates.nth(index);
-
-      try {
-        const visible =
-          await candidate.isVisible();
-
-        const enabled =
-          await candidate.isEnabled();
-
-        const innerText =
-          String(
-            await candidate
-              .innerText()
-              .catch(() => '')
-          )
-            .replace(/\s+/g, ' ')
-            .trim();
-
-        const ariaLabel =
-          String(
-            await candidate
-              .getAttribute('aria-label')
-              .catch(() => '') ||
-            ''
-          ).trim();
-
-        const value =
-          String(
-            await candidate
-              .getAttribute('value')
-              .catch(() => '') ||
-            ''
-          ).trim();
-
-        const label =
-          innerText ||
-          ariaLabel ||
-          value ||
-          '<no-label>';
-
-        candidateSummary.push({
-          index: index + 1,
-          label,
-          visible,
-          enabled,
-        });
-
-        if (!visible || !enabled) {
-          continue;
-        }
-
-        if (
-          /\b(?:log\s*in|continue)\b/i.test(label)
-        ) {
-          console.error(
-            `[MCP auth] Using authentication button ${index + 1}/${count}: ${label}`
-          );
-
-          return candidate;
-        }
-
-        /*
-         * Auth0 occasionally exposes the visible primary submit
-         * before its text node is fully rendered. Retain the first
-         * visible and enabled primary submit as a safe fallback.
-         */
-        if (!visibleFallback) {
-          visibleFallback =
-            candidate;
-        }
-      } catch (_) {
-        // Auth0 may rerender candidates while the form changes.
-      }
-    }
-
-    lastCandidateSummary =
-      candidateSummary;
-
-    if (visibleFallback) {
-      console.error(
-        '[MCP auth] Log in label was unavailable; using the first visible enabled primary submit button.'
-      );
-
-      return visibleFallback;
-    }
-
-    await activePage.waitForTimeout(250);
-  }
-
-  console.error(
-    `[MCP auth] Submit-button candidates at timeout: ${JSON.stringify(lastCandidateSummary)}`
-  );
-
-  return null;
-}
-
-async function performDeterministicLogin(
-  activePage
-) {
-  const {
-    loginUrl,
-    email,
-    password,
-  } = loadDeterministicCredentials();
-
-  console.error(
-    `[MCP auth] Starting deterministic login in execution browser: ${loginUrl}`
-  );
-
-  await activePage.goto(
-    loginUrl,
-    {
-      waitUntil: 'domcontentloaded',
-      timeout: 120000,
-    }
-  );
-
-  const emailInput =
-    activePage
-      .locator([
-        '#username',
-        'input[type="email"]',
-        'input[name="email"]',
-        'input[autocomplete="username"]',
-        '[data-testid="email"]',
-      ].join(', '))
-      .first();
-
-  await emailInput.waitFor({
-    state: 'visible',
-    timeout: 60000,
-  });
-
-  await emailInput.fill(email);
-
-  const firstLoginButton =
-    await findVisibleLoginButton(activePage);
-
-  if (!firstLoginButton) {
-    throw new Error(
-      'First deterministic Log in or Continue button was not found.'
-    );
-  }
-
-  await firstLoginButton.click();
-
-  const passwordInput =
-    activePage
-      .locator([
-        '#password',
-        'input[type="password"]',
-        'input[name="password"]',
-        'input[autocomplete="current-password"]',
-        '[data-testid="password"]',
-      ].join(', '))
-      .first();
-
-  await passwordInput.waitFor({
-    state: 'visible',
-    timeout: 60000,
-  });
-
-  await passwordInput.click();
-  await passwordInput.fill('');
-  await passwordInput.fill(password);
-
-  await activePage.waitForTimeout(500);
-
-  let enteredPassword =
-    await passwordInput
-      .inputValue()
-      .catch(() => '');
-
-  let activePasswordInput =
-    passwordInput;
-
-  if (enteredPassword !== password) {
-    console.error(
-      '[MCP auth] Password field rerendered. Locating and filling it again.'
-    );
-
-    activePasswordInput =
-      activePage
-        .locator([
-          '#password',
-          'input[type="password"]',
-          'input[name="password"]',
-          'input[autocomplete="current-password"]',
-          '[data-testid="password"]',
-        ].join(', '))
-        .first();
-
-    await activePasswordInput.waitFor({
-      state: 'visible',
-      timeout: 30000,
-    });
-
-    await activePasswordInput.click();
-    await activePasswordInput.fill('');
-    await activePasswordInput.fill(password);
-
-    await activePage.waitForTimeout(500);
-
-    enteredPassword =
-      await activePasswordInput
-        .inputValue()
-        .catch(() => '');
-  }
-
-  if (enteredPassword !== password) {
-    throw new Error(
-      'Password field did not retain TEST_LOGIN_PASSWORD.'
-    );
-  }
-
-  console.error(
-    '[MCP auth] Password entered and verified.'
-  );
-
-  let secondLoginButton =
-    await findVisibleLoginButton(activePage);
-
-  if (!secondLoginButton) {
-    throw new Error(
-      'Second deterministic Log in or Continue button was not found.'
-    );
-  }
-
-  /*
-   * Auth0 may rerender the password input while the submit
-   * button is being resolved. Verify the currently visible
-   * password field immediately before submission.
-   */
-  let submitPasswordInput =
-    activePage
-      .locator([
-        'input[type="password"]',
-        'input[name="password"]',
-        'input[autocomplete="current-password"]',
-        '[data-testid="password"]',
-      ].join(', '))
-      .first();
-
-  await submitPasswordInput.waitFor({
-    state: 'visible',
-    timeout: 30000,
-  });
-
-  let passwordBeforeSubmit =
-    await submitPasswordInput
-      .inputValue()
-      .catch(() => '');
-
-  if (passwordBeforeSubmit !== password) {
-    console.error(
-      '[MCP auth] Password was cleared before submit. Filling the active field again.'
-    );
-
-    await submitPasswordInput.click();
-    await submitPasswordInput.fill('');
-    await submitPasswordInput.fill(password);
-
-    await activePage.waitForTimeout(300);
-
-    passwordBeforeSubmit =
-      await submitPasswordInput
-        .inputValue()
-        .catch(() => '');
-  }
-
-  if (passwordBeforeSubmit !== password) {
-    throw new Error(
-      'Password field was empty immediately before authentication submit.'
-    );
-  }
-
-  /*
-   * Auth0 contains hidden and visible submit controls. A direct
-   * DOM click matches the previously working deterministic flow
-   * and avoids focus/actionability behaviour clearing the field.
-   */
-  secondLoginButton =
-    await findVisibleLoginButton(activePage);
-
-  if (!secondLoginButton) {
-    throw new Error(
-      'Visible password Log in or Continue button disappeared before submit.'
-    );
-  }
-
-  console.error(
-    '[MCP auth] Clicking second authentication button with password retained.'
-  );
-
-  await secondLoginButton.evaluate(
-    button => button.click()
-  );
-
-  console.error(
-    '[MCP auth] Second authentication button clicked.'
-  );
-
-  await activePage
-    .waitForURL(
-      url =>
-        !/\/u\/login|\/authorize|auth0/i.test(
-          String(url)
-        ),
-      {
-        timeout: 120000,
-      }
-    )
-    .catch(() => {});
-
-  const targetEnv = String(
-    process.env.TARGET_ENV || 'UAT'
-  ).toUpperCase();
-
-  const appUrl =
-    targetEnv === 'PROD'
-      ? process.env.URL_PROD ||
-        'https://www.woolworths.com.au'
-      : process.env.URL_UAT ||
-        'https://uatsite.woolworths.com.au';
-
-  await activePage.goto(
-    appUrl,
-    {
-      waitUntil: 'domcontentloaded',
-      timeout: 120000,
-    }
-  );
-
-  await activePage.waitForTimeout(2500);
-
-  if (
-    /\/u\/login|\/authorize|auth0/i.test(
-      activePage.url()
-    )
-  ) {
-    throw new Error(
-      `Deterministic authentication did not reach the application. Current URL: ${activePage.url()}`
-    );
-  }
-
-  console.error(
-    `[MCP auth] Authenticated execution browser ready: ${activePage.url()}`
-  );
-}
-
 async function ensurePage() {
   ensureDirs();
 
@@ -593,14 +120,6 @@ async function ensurePage() {
         height: 1100,
       },
     };
-
-    if (readEnv('RUN_TARGET', 'local').toLowerCase() !== 'browserstack' &&
-        String(process.env.RECORD_VIDEO || 'true').toLowerCase() !== 'false') {
-      contextOptions.recordVideo = {
-        dir: videosDir,
-        size: { width: 1440, height: 1100 },
-      };
-    }
 
     const configuredStorageState =
       String(
@@ -645,14 +164,6 @@ async function ensurePage() {
 
     page =
       await browserContext.newPage();
-
-    if (
-      String(
-        process.env.MCP_DETERMINISTIC_AUTH || ''
-      ).toLowerCase() === 'true'
-    ) {
-      await performDeterministicLogin(page);
-    }
 
     olive =
       new OliveWebBot(page);
@@ -1172,142 +683,6 @@ async function exploreHelpCenter(activePage, options = {}) {
   return exploration;
 }
 
-
-function redactRuntimeValue(value) {
-  return String(value || '')
-    .replace(/\b\d{6,}\b/g, '[REDACTED_ID]')
-    .replace(/\b[A-Z0-9]{12,}\b/gi, '[REDACTED_TOKEN]')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-async function capturePageState(activePage) {
-  pageRuntimeElements.clear();
-  pageRuntimeSequence = 0;
-  const controls = [];
-  const inputs = [];
-  const seen = new Set();
-  const candidates = activePage.locator('button, a[href], [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], [role="radio"]');
-  const count = Math.min(await candidates.count().catch(() => 0), 180);
-  for (let index = 0; index < count; index += 1) {
-    const locator = candidates.nth(index);
-    if (!(await locator.isVisible({ timeout: 100 }).catch(() => false))) continue;
-    const rawLabel = String(
-      await locator.getAttribute('aria-label').catch(() => '') ||
-      await locator.innerText().catch(() => '') ||
-      await locator.getAttribute('title').catch(() => '') || ''
-    ).replace(/\s+/g, ' ').trim();
-    if (!rawLabel || rawLabel.length > 300) continue;
-    const role = await locator.getAttribute('role').catch(() => '') || await locator.evaluate(el => el.tagName.toLowerCase()).catch(() => 'control');
-    const key = `${role}|${rawLabel}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    pageRuntimeSequence += 1;
-    const id = `page_control_${pageRuntimeSequence}`;
-    pageRuntimeElements.set(id, { locator, kind: 'control', rawLabel });
-    controls.push({
-      id,
-      type: role,
-      label: redactRuntimeValue(rawLabel),
-      enabled: !(await locator.isDisabled().catch(() => false)) && await locator.getAttribute('aria-disabled').catch(() => null) !== 'true',
-    });
-  }
-  const inputCandidates = activePage.locator('textarea, input:not([type="hidden"]), select, [contenteditable="true"], [role="textbox"], [role="combobox"]');
-  const inputCount = Math.min(await inputCandidates.count().catch(() => 0), 40);
-  for (let index = 0; index < inputCount; index += 1) {
-    const locator = inputCandidates.nth(index);
-    if (!(await locator.isVisible({ timeout: 100 }).catch(() => false))) continue;
-    pageRuntimeSequence += 1;
-    const id = `page_input_${pageRuntimeSequence}`;
-    pageRuntimeElements.set(id, { locator, kind: 'input' });
-    inputs.push({
-      id,
-      type: await locator.getAttribute('type').catch(() => null) || await locator.getAttribute('role').catch(() => null) || 'text',
-      placeholder: redactRuntimeValue(await locator.getAttribute('placeholder').catch(() => '') || await locator.getAttribute('aria-label').catch(() => '') || ''),
-      enabled: !(await locator.isDisabled().catch(() => false)) && await locator.getAttribute('aria-disabled').catch(() => null) !== 'true',
-    });
-  }
-  const text = await activePage.locator('main, [role="main"], body').first().evaluate(element => {
-    const values = [];
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-    while (walker.nextNode() && values.length < 160) {
-      const node = walker.currentNode;
-      const parent = node.parentElement;
-      if (!parent) continue;
-      const style = getComputedStyle(parent);
-      const rect = parent.getBoundingClientRect();
-      const value = String(node.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!value || value.length < 2 || value.length > 500) continue;
-      if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0) continue;
-      values.push(value);
-    }
-    return [...new Set(values)];
-  }).catch(() => []);
-  return {
-    surfaceReady: true,
-    busy: false,
-    url: activePage.url(),
-    title: await activePage.title().catch(() => ''),
-    controls,
-    inputs,
-    text: text.map(redactRuntimeValue).slice(-120),
-    capturedAt: new Date().toISOString(),
-  };
-}
-
-async function executePageAction(activePage, action = {}) {
-  const kind = String(action.action || '').toUpperCase();
-  if (kind === 'WAIT') {
-    await activePage.waitForTimeout(Math.min(Math.max(Number(action.waitMs || 1200), 250), 10000));
-    return { executed: true, action: kind, scope: 'PAGE' };
-  }
-  const entry = pageRuntimeElements.get(String(action.targetId || ''));
-  if (!entry) throw new Error(`Page runtime element not found: ${action.targetId || '<none>'}`);
-  const locator = entry.locator;
-  if (!(await locator.isVisible({ timeout: 2000 }).catch(() => false))) throw new Error(`Page runtime element is no longer visible: ${action.targetId}`);
-  if (kind === 'CLICK') {
-    await locator.scrollIntoViewIfNeeded().catch(() => {});
-    await locator.click({ timeout: 10000 });
-  } else if (kind === 'TYPE') {
-    await locator.click({ timeout: 10000 });
-    await locator.fill(String(action.value || '')).catch(async () => {
-      await locator.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
-      await locator.type(String(action.value || ''), { delay: 8 });
-    });
-  } else {
-    throw new Error(`Unsupported PAGE action: ${kind}`);
-  }
-  await activePage.waitForTimeout(500);
-  return { executed: true, action: kind, scope: 'PAGE', targetId: action.targetId };
-}
-
-async function finaliseRuntime() {
-  const videoCandidates = [];
-  if (browserContext) {
-    for (const candidatePage of browserContext.pages()) {
-      const video = candidatePage.video?.();
-      if (video) videoCandidates.push(video);
-    }
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    page = null;
-    olive = null;
-  }
-  if (browser) {
-    await browser.close().catch(() => {});
-    browser = null;
-  }
-  const videoFiles = [];
-  for (const video of videoCandidates) {
-    const videoPath = await video.path().catch(() => '');
-    if (videoPath) videoFiles.push(videoPath);
-  }
-  const screenshotFiles = fs.existsSync(screenshotsDir)
-    ? fs.readdirSync(screenshotsDir).filter(name => /\.(png|jpg|jpeg|webp)$/i.test(name)).map(name => path.join(screenshotsDir, name))
-    : [];
-  return { finalised: true, videoFiles, screenshotFiles };
-}
-
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -1378,52 +753,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'pw_open_olive',
       description: 'Open the Woolworths Olive / Ask Anything chat surface and wait until a chat textbox is available.',
       inputSchema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'pw_capture_runtime_state',
-      description: 'Capture structured state from both the chatbot and the surrounding application page using runtime-only element IDs.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'pw_execute_runtime_action',
-      description: 'Execute a generic action against CHAT or PAGE scope using a runtime element ID.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          scope: { type: 'string', enum: ['CHAT', 'PAGE'] },
-          action: { type: 'string', enum: ['CLICK', 'TYPE', 'SEND_MESSAGE', 'WAIT'] },
-          targetId: { type: 'string' },
-          value: { type: 'string' },
-          waitMs: { type: 'number' },
-          reason: { type: 'string' },
-        },
-        required: ['scope', 'action'],
-      },
-    },
-    {
-      name: 'pw_finalize_run',
-      description: 'Close the runtime browser context and finalise run-scoped video and screenshot artifacts.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'pw_capture_olive_state',
-      description: 'Capture scenario-independent structured Olive UI state with runtime-only element IDs.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'pw_execute_olive_action',
-      description: 'Execute a generic Olive action using a runtime element ID.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          action: { type: 'string', enum: ['CLICK', 'TYPE', 'SEND_MESSAGE', 'WAIT', 'COMPLETE', 'FAIL'] },
-          targetId: { type: 'string' },
-          value: { type: 'string' },
-          waitMs: { type: 'number' },
-          reason: { type: 'string' },
-        },
-        required: ['action'],
-      },
     },
     {
       name: 'pw_send_olive_message',
@@ -1695,39 +1024,6 @@ ${exploration.screenshots.join('\n')}
         };
       }
 
-      case 'pw_capture_runtime_state': {
-        const chat = await olive.captureStructuredState();
-        const pageState = await capturePageState(activePage);
-        return { content: [{ type: 'text', text: JSON.stringify({ chat, page: pageState, capturedAt: new Date().toISOString() }) }] };
-      }
-
-      case 'pw_execute_runtime_action': {
-        const scope = String(args.scope || 'CHAT').toUpperCase();
-        const result = scope === 'PAGE'
-          ? await executePageAction(activePage, args)
-          : await olive.executeStructuredAction(args);
-        let screenshotPathValue = '';
-        if (String(process.env.CAPTURE_RUNTIME_SCREENSHOTS || 'true').toLowerCase() !== 'false') {
-          screenshotPathValue = await takeFullPageScreenshot(activePage, `runtime-${Date.now()}-${scope.toLowerCase()}-${String(args.action || 'action').toLowerCase()}`, screenshotsDir).catch(() => '');
-        }
-        return { content: [{ type: 'text', text: JSON.stringify({ ...result, scope, screenshotPath: screenshotPathValue }) }] };
-      }
-
-      case 'pw_finalize_run': {
-        const result = await finaliseRuntime();
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-      }
-
-      case 'pw_capture_olive_state': {
-        const state = await olive.captureStructuredState();
-        return { content: [{ type: 'text', text: JSON.stringify(state) }] };
-      }
-
-      case 'pw_execute_olive_action': {
-        const result = await olive.executeStructuredAction(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-      }
-
       case 'pw_send_olive_message': {
         const result =
           await olive.sendMessage(args.text);
@@ -1742,33 +1038,8 @@ ${exploration.screenshots.join('\n')}
             String(result.userMessage || args.text)
               .slice(0, 1000),
 
-          newBotMessages:
-            Array.isArray(result.newBotMessages)
-              ? result.newBotMessages
-                  .map(message =>
-                    String(message || '')
-                      .replace(/^text:\s*/i, '')
-                      .trim()
-                  )
-                  .filter(Boolean)
-                  .slice(0, 20)
-              : [],
-
           botResponse:
-            String(
-              Array.isArray(result.newBotMessages) &&
-              result.newBotMessages.length
-                ? result.newBotMessages
-                    .map(message =>
-                      String(message || '')
-                        .replace(/^text:\s*/i, '')
-                        .trim()
-                    )
-                    .filter(Boolean)
-                    .join('\n')
-                : result.botResponse || ''
-            )
-              .replace(/^text:\s*/i, '')
+            String(result.botResponse || '')
               .slice(
                 0,
                 Number(
@@ -1785,12 +1056,7 @@ ${exploration.screenshots.join('\n')}
 
           newBotMessageCount:
             Number(
-              result.newBotMessageCount ||
-              (
-                Array.isArray(result.newBotMessages)
-                  ? result.newBotMessages.length
-                  : 0
-              )
+              result.newBotMessageCount || 0
             ),
 
           screenshotCaptured:
@@ -1814,137 +1080,18 @@ ${exploration.screenshots.join('\n')}
       }
 
       case 'pw_click_button': {
-        const targetText =
-          String(args.targetText || '')
-            .trim();
+        const locator = activePage.getByRole('button', { name: new RegExp(args.targetText, 'i') }).first();
 
-        let clickedInOlive = false;
-        let oliveClickResult = null;
-
-        if (olive) {
-          try {
-            oliveClickResult =
-              await olive.clickControl(
-                targetText
-              );
-
-            clickedInOlive = true;
-          } catch (error) {
-            console.error(
-              `[MCP click] Olive control lookup did not match: ${error.message}`
-            );
-          }
-        }
-
-        if (!clickedInOlive) {
-          const pageButton =
-            activePage
-              .getByRole(
-                'button',
-                {
-                  name: targetText,
-                  exact: true,
-                }
-              )
-              .first();
-
-          if (
-            await pageButton
-              .isVisible({
-                timeout: 3000,
-              })
-              .catch(() => false)
-          ) {
-            await pageButton.click();
-          } else {
-            await activePage
-              .getByText(
-                targetText,
-                {
-                  exact: true,
-                }
-              )
-              .first()
-              .click({
-                timeout: 10000,
-              });
-          }
-        }
-
-        /*
-         * Do not wait for page network stability after an Olive
-         * chat control. The widget updates asynchronously inside
-         * its frame and may not trigger page navigation.
-         */
-        if (!clickedInOlive) {
-          await waitForStablePage(
-            activePage
-          );
+        if (await locator.isVisible({ timeout: 5000 }).catch(() => false)) {
+          await locator.click();
         } else {
-          await activePage.waitForTimeout(
-            500
-          );
+          await activePage.locator(`text=${args.targetText}`).first().click({ timeout: 10000 });
         }
 
-        const clickResult =
-          clickedInOlive
-            ? {
-                clicked: true,
-                targetText,
-                location: 'olive',
-                newBotMessages:
-                  Array.isArray(
-                    oliveClickResult
-                      ?.newBotMessages
-                  )
-                    ? oliveClickResult
-                        .newBotMessages
-                        .map(message =>
-                          String(message || '')
-                            .replace(
-                              /^text:\s*/i,
-                              ''
-                            )
-                            .trim()
-                        )
-                        .filter(Boolean)
-                    : [],
-                botResponse:
-                  String(
-                    oliveClickResult
-                      ?.botResponse ||
-                    ''
-                  )
-                    .replace(
-                      /^text:\s*/i,
-                      ''
-                    )
-                    .trim(),
-                conversationState:
-                  oliveClickResult
-                    ?.conversationState ||
-                  'UNKNOWN',
-                newBotMessageCount:
-                  Number(
-                    oliveClickResult
-                      ?.newBotMessageCount ||
-                    0
-                  ),
-              }
-            : {
-                clicked: true,
-                targetText,
-                location: 'page',
-              };
+        await waitForStablePage(activePage);
 
         return {
-          content: [{
-            type: 'text',
-            text:
-              JSON.stringify(
-                clickResult
-              ),
-          }],
+          content: [{ type: 'text', text: `Clicked element matching ${args.targetText}` }],
         };
       }
 

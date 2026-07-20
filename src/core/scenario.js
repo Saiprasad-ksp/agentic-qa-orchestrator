@@ -26,6 +26,9 @@ function parseScenarioText(text) {
     title: '',
     platform: 'web',
     testType: 'deterministic',
+    executionMode: '',
+    authRequired: false,
+    authFlow: '',
     tags: [],
     goal: '',
     expectations: [],
@@ -48,6 +51,9 @@ function parseScenarioText(text) {
     if (key === 'TITLE' || key === 'NAME') result.title = value;
     else if (key === 'PLATFORM') result.platform = /android|ios|mobile/i.test(value) ? 'mobile' : 'web';
     else if (key === 'TEST_TYPE' || key === 'TYPE') result.testType = /generative|chat|olive/i.test(value) ? 'generative' : 'deterministic';
+    else if (key === 'EXECUTION_MODE') result.executionMode = value.trim().toLowerCase();
+    else if (key === 'AUTH_REQUIRED') result.authRequired = /^(true|yes|1)$/i.test(value);
+    else if (key === 'AUTH_FLOW') result.authFlow = value.trim().toLowerCase();
     else if (key === 'TAGS') result.tags = normaliseTags(value);
     else if (key === 'GOAL') result.goal = value;
     else if (['EXPECTATIONS', 'ACCEPTANCE_CRITERIA'].includes(key)) {

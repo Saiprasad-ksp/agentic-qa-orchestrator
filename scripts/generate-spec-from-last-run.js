@@ -36,117 +36,44 @@ function promptFor({ scenario, evidence, errors }) {
   const common = `
 You generate a validated executable QA spec from a successful real discovery run.
 Output only CommonJS JavaScript without markdown.
-Never invent framework APIs, credentials, absolute local paths, shell commands, or hardcoded environment URLs.
+Never invent framework APIs, credentials, absolute local paths, shell commands, hardcoded environment URLs, exact generative bot wording, runtime control IDs or recorded chip labels.
 Preserve these tags in test titles: ${tags}
 Use environment values through src/env.js.
 
-The readEnv API is:
-readEnv('VARIABLE_NAME', 'optional fallback').
-
-Never call readEnv() without a key.
-Never use property access such as:
-readEnv().TARGET_PATH
-readEnv().WEB_BASE_URL
-readEnv().BASE_URL
-
-For web navigation, use exactly:
-const baseUrl =
-  readEnv('WEB_BASE_URL') ||
-  readEnv('BASE_URL');
-
-const targetPath =
-  readEnv('TARGET_PATH', '/');
-
-if (!baseUrl) {
-  throw new Error(
-    'WEB_BASE_URL or BASE_URL must be configured.'
-  );
-}
-
-await page.goto(
-  new URL(targetPath, baseUrl).toString()
-);
+The readEnv API is readEnv('VARIABLE_NAME', 'optional fallback').
+Never call readEnv() without a key and never create an env object from readEnv().
 
 Scenario:\n${scenario.raw}\nDiscovery evidence:\n${evidence.slice(0, 30000)}\nPrevious validation errors:\n${errors || 'none'}\n`;
 
   if (scenario.platform === 'mobile') {
     return `${common}
 Generate a WebdriverIO v9 Mocha spec for generated-specs/mobile/${scenario.baseName}.spec.js.
-Use global browser APIs. Import readEnv from ../../src/env.
-For generative scenarios import OliveMobileBot from ../../src/mobile/oliveMobileBot and runConversationTurns from ../../src/generative/turnRunner.
-Store execution evidence under process.env.QA_RUN_DIR when available.
-Do not embed Appium capabilities in the spec; wdio.conf.js owns capabilities.
-For deterministic scenarios use accessibility IDs, Android UiSelector or iOS predicates grounded in evidence and provide sensible deterministic fallbacks.
-For generative scenarios create structured turns with userMessage, expectedIntent, acceptanceCriteria and blockedPatterns, then call bot.sendAndJudge for every turn.
+Use global browser APIs and import { OliveMobileBot } from ../../src/mobile/oliveMobileBot.
+For generative scenarios, create a semanticContract object containing the business objective, typed milestone objects, success conditions, failure conditions and maximum turns. Do not emit milestone strings. Preserve explicit scenario-authored customer messages as REQUIRED_CUSTOMER_MESSAGE with a non-empty value.
+Execute it through:
+const bot = new OliveMobileBot(browser);
+await bot.ensureAuthenticated({ required: true });
+await bot.open();
+await bot.runGeneratedJourney({ scenario: semanticContract, maxTurns });
+Generated-spec execution is deterministic-first: preserve explicit scenario-authored customer messages and milestone order. Use local locator matching/self-healing first, then LLM fallback only when deterministic healing cannot resolve the current control. Do not replay discovered bot responses, runtime control IDs or incidental generated chip wording. Do not assert exact bot sentences. Do not embed Appium capabilities; wdio.conf.js owns local and BrowserStack capabilities.
+For deterministic non-generative scenarios, use stable accessibility locators grounded in evidence.
 `;
   }
 
   return `${common}
 Generate a Playwright CommonJS spec for generated-specs/web/${scenario.baseName}.spec.js.
 Import { test, expect } from @playwright/test.
-Import both loadProjectEnv and readEnv from ../../src/env exactly as:
-const { loadProjectEnv, readEnv } = require('../../src/env');
-
-Before reading any environment variable, call exactly:
-loadProjectEnv('.env.web', '.env.llm', '.env.browserstack');
-
-Use role, label, placeholder and stable test-id selectors grounded in discovery evidence.
-For generative web scenarios use these exact existing CommonJS APIs:
-const { OliveWebBot } = require('../../src/oliveWebBot');
-const { runConversationTurns } = require('../../src/generative/turnRunner');
-
-Instantiate the bot exactly as:
+Import { loadProjectEnv, readEnv } from ../../src/env and call loadProjectEnv('.env.web', '.env.llm', '.env.browserstack') before reading values.
+Resolve the target URL from WEB_BASE_URL or BASE_URL plus TARGET_PATH. Never hardcode the environment URL.
+For generative scenarios, import { OliveWebBot } from ../../src/oliveWebBot and create a semanticContract object containing the business objective, typed milestone objects, success conditions, failure conditions and maximum turns. Do not emit milestone strings. Each milestone must use one of REQUIRED_CUSTOMER_MESSAGE, SEMANTIC_CONTROL, WAIT, or SEMANTIC_VALIDATION. Preserve explicit scenario-authored customer messages as REQUIRED_CUSTOMER_MESSAGE with a non-empty value.
+Execute it through:
 const bot = new OliveWebBot(page);
-
-Open the chatbot exactly as:
+await bot.ensureAuthenticated({ targetUrl, required: true });
 await bot.open();
-
-Send a customer message using:
-await bot.sendMessage(customerMessage);
-
-The existing runConversationTurns API is exactly:
-await runConversationTurns({
-  turns,
-  sendAndJudge,
-  outputDir,
-  testInfo,
-});
-
-The turns value must be an array of deterministic turns recovered from the successful discovery evidence, for example:
-const turns = [
-  {
-    userMessage: 'Discovered customer message',
-    expectedIntent: 'missing_items',
-    acceptanceCriteria: ['recognises the intent'],
-    blockedPatterns: ['unsupported guarantee'],
-  },
-];
-
-The sendAndJudge callback must accept one turn and return the combined chatbot and validation result:
-sendAndJudge: async turn => {
-  const chatbotResult = await bot.sendMessage(turn.userMessage);
-  return {
-    ...chatbotResult,
-    passed: true,
-  };
-}
-
-Do not pass initialTurn, customerPersona, conversationStrategy, expectations, allowedIntermediateStates, failureConditions, stopConditions, generateFollowUp or validateBotResponse into runConversationTurns.
-Do not invent a different runConversationTurns signature.
-Generated regression specs must replay the successful discovered messages deterministically.
-
-Do not create an env object from readEnv().
-Do not call readEnv() without a variable name.
-Do not navigate to a relative path by itself.
-Use the exact web navigation pattern defined above.
-
-Do not invent methods such as openChatbot, sendAndJudge, openWidget, startChat or waitForGreeting.
-Do not pass testInfo into the OliveWebBot constructor.
-Use only APIs proven by the discovery evidence or explicitly listed above.
-Use the successful discovered customer messages as deterministic regression inputs.
-Validate semantic response state and behaviour rather than exact chatbot wording.
-For deterministic scenarios use existing reusable helpers only when they match the scenario evidence, including VisualValidator, auditLinksAndButtons and runAdvancedHelpCenterExploration.
-Set an appropriate test timeout and attach evidence through testInfo.
+await bot.runGeneratedJourney({ scenario: semanticContract, maxTurns });
+Generated-spec execution is deterministic-first: preserve explicit scenario-authored customer messages and milestone order. Use local locator matching/self-healing first, then LLM fallback only when deterministic healing cannot resolve the current control. Do not replay discovered bot responses, runtime control IDs or incidental generated chip wording. Do not assert exact bot sentences.
+For deterministic non-generative scenarios, use stable role, label, test-id or existing reusable helpers grounded in evidence.
+Set an appropriate timeout and attach useful evidence through testInfo.
 `;
 }
 

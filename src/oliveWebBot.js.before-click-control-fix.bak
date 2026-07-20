@@ -79,103 +79,65 @@ async function visible(locator, timeout = 500) {
     .catch(() => false);
 }
 
-
-function loadDeterministicLoginConfig() {
-  const credentialsPath = path.resolve(
-    process.cwd(),
-    process.env.AGENTIC_QA_CREDENTIALS_DIR || '.credentials',
-    'login.env'
-  );
-
-  if (fs.existsSync(credentialsPath)) {
-    const allowed = new Set([
-      'LOGIN_URL_UAT',
-      'LOGIN_URL_PROD',
-      'TEST_LOGIN_EMAIL',
-      'TEST_LOGIN_PASSWORD',
-    ]);
-
-    for (const original of fs.readFileSync(credentialsPath, 'utf8').replace(/\r/g, '').split('\n')) {
-      let line = original.trim().replace(/^export\s+/, '');
-      if (!line || line.startsWith('#') || !line.includes('=')) continue;
-      const index = line.indexOf('=');
-      const key = line.slice(0, index).trim();
-      if (!allowed.has(key)) continue;
-      let value = line.slice(index + 1).trim();
-      if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) value = value.slice(1, -1);
-      process.env[key] = value;
-    }
-  }
-
-  const targetEnv = String(process.env.TARGET_ENV || 'UAT').toUpperCase();
-  const loginUrl = targetEnv === 'PROD' ? process.env.LOGIN_URL_PROD : process.env.LOGIN_URL_UAT;
-  const email = process.env.TEST_LOGIN_EMAIL;
-  const password = process.env.TEST_LOGIN_PASSWORD;
-  return { loginUrl, email, password };
-}
-
-async function findEnabledAuthSubmit(page, timeout = 30000) {
-  const selector = [
-    'button[data-action-button-primary="true"]:not([aria-hidden="true"]):not(.ulp-hidden-form-submit-button)',
-    'button[type="submit"]:not([aria-hidden="true"]):not(.ulp-hidden-form-submit-button)',
-  ].join(', ');
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const candidates = page.locator(selector);
-    for (let index = 0; index < await candidates.count(); index += 1) {
-      const candidate = candidates.nth(index);
-      if (await candidate.isVisible().catch(() => false) && await candidate.isEnabled().catch(() => false)) return candidate;
-    }
-    await page.waitForTimeout(250);
-  }
-  return null;
-}
-
-async function performDeterministicWebLogin(page, targetUrl) {
-  const { loginUrl, email, password } = loadDeterministicLoginConfig();
-  if (!loginUrl || !email || !password) {
-    throw new Error('Deterministic login configuration is incomplete. Check .credentials/login.env.');
-  }
-
-  console.log(`[Auth] Starting deterministic login: ${loginUrl}`);
-  await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
-
-  const emailInput = page.locator([
-    '#username', 'input[type="email"]', 'input[name="email"]',
-    'input[autocomplete="username"]', '[data-testid="email"]',
-  ].join(', ')).first();
-  await emailInput.waitFor({ state: 'visible', timeout: 60000 });
-  await emailInput.fill(email);
-
-  const firstSubmit = await findEnabledAuthSubmit(page);
-  if (!firstSubmit) throw new Error('Deterministic login email submit button was not found.');
-  await firstSubmit.click();
-
-  const passwordInput = page.locator([
-    '#password', 'input[type="password"]', 'input[name="password"]',
-    'input[autocomplete="current-password"]', '[data-testid="password"]',
-  ].join(', ')).first();
-  await passwordInput.waitFor({ state: 'visible', timeout: 60000 });
-  await passwordInput.fill(password);
-  if (await passwordInput.inputValue().catch(() => '') !== password) {
-    await passwordInput.fill('');
-    await passwordInput.fill(password);
-  }
-
-  const secondSubmit = await findEnabledAuthSubmit(page);
-  if (!secondSubmit) throw new Error('Deterministic login password submit button was not found.');
-  await secondSubmit.evaluate(button => button.click());
-  await page.waitForURL(url => !/\/u\/login|\/authorize|auth0/i.test(String(url)), { timeout: 120000 }).catch(() => {});
-  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
-  await page.waitForTimeout(2500);
-  if (/\/u\/login|\/authorize|auth0/i.test(page.url())) {
-    throw new Error(`Deterministic authentication failed. Current URL: ${page.url()}`);
-  }
-  console.log(`[Auth] Deterministic login completed: ${page.url()}`);
-}
-
 function detectConversationState(text) {
-  return String(text || '').trim() ? 'OBSERVED_RESPONSE' : 'UNKNOWN';
+  const value = String(text || '').toLowerCase();
+
+  if (
+    /log\s*in|sign\s*in|your account|authenticate/.test(value)
+  ) {
+    return 'AUTHENTICATION_REQUIRED';
+  }
+
+  if (
+    /select.*order|choose.*order|which order|recent order/.test(value)
+  ) {
+    return 'ORDER_SELECTION';
+  }
+
+  if (
+    /select.*item|choose.*item|which item/.test(value)
+  ) {
+    return 'ITEM_SELECTION';
+  }
+
+  if (
+    /refund|money back|processing time|business days/.test(value)
+  ) {
+    return 'REFUND_INFORMATION';
+  }
+
+  if (
+    /connecting you|transferring you|joining the chat|you are now connected|please wait while i connect|queue position/i.test(value)
+  ) {
+    return 'HUMAN_ESCALATION';
+  }
+
+  if (
+    /(?:which order|select(?: or type)?(?: the)? order|choose(?: an?)? order|order number)/i.test(value) ||
+    /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.{0,60}\b\d{6,}\b/i.test(value)
+  ) {
+    return 'ORDER_SELECTION';
+  }
+
+  if (
+    /can connect you|connect you with|talk to a team member|contact support|need more support/i.test(value)
+  ) {
+    return 'CAN_ESCALATE';
+  }
+
+  if (
+    /sorry|understand|missing.*item|help.*sort/.test(value)
+  ) {
+    return 'ACKNOWLEDGED';
+  }
+
+  if (
+    /didn't quite catch|did not quite catch|rephras/.test(value)
+  ) {
+    return 'FALLBACK';
+  }
+
+  return 'UNKNOWN';
 }
 
 class OliveWebBot {
@@ -191,9 +153,6 @@ class OliveWebBot {
 
     this.initialChatReady = false;
     this.initialGreetingLines = [];
-    this.structuredStateBaselineLines = [];
-    this.runtimeElements = new Map();
-    this.runtimeElementSequence = 0;
   }
 
   async goto(url) {
@@ -218,10 +177,6 @@ class OliveWebBot {
 
     if (existing) {
       await this.waitUntilReady(existing);
-
-      this.structuredStateBaselineLines =
-        await this.readChatLines();
-
       return existing;
     }
 
@@ -258,9 +213,6 @@ class OliveWebBot {
         await this.waitUntilReady(
           appearedSurface
         );
-
-        this.structuredStateBaselineLines =
-          await this.readChatLines();
 
         return appearedSurface;
       }
@@ -483,10 +435,6 @@ class OliveWebBot {
           );
 
           await this.waitUntilReady(surface);
-
-          this.structuredStateBaselineLines =
-            await this.readChatLines();
-
           return surface;
         }
 
@@ -1161,541 +1109,6 @@ class OliveWebBot {
     return lines;
   }
 
-  redactRuntimeLabel(value) {
-    return String(value || '')
-      .replace(/\b\d{6,}\b/g, '[REDACTED_ID]')
-      .replace(/\b[A-Z0-9]{12,}\b/gi, '[REDACTED_TOKEN]')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  registerRuntimeElement(locator, kind, metadata = {}) {
-    this.runtimeElementSequence += 1;
-    const id = `${kind}_${this.runtimeElementSequence}`;
-    this.runtimeElements.set(id, { locator, kind, metadata });
-    return id;
-  }
-
-  async captureStructuredState() {
-    const surface =
-      this.lastSurface ||
-      await this.findChatSurface({ timeout: 4000 }) ||
-      await this.open();
-
-    const input = await this.findInputInSurface(surface);
-    const root = this.lastChatRoot ||
-      (input ? await this.findChatRoot(surface, input) : null);
-    /*
-     * The chat root is useful for transcript extraction, but some
-     * implementations render controls and the textbox outside that
-     * container. Interactive discovery must use the whole Olive
-     * surface/frame.
-     */
-    const scope = surface;
-
-    this.runtimeElements.clear();
-    this.runtimeElementSequence = 0;
-
-    const allLines =
-      await this.readChatLines();
-
-    const baseline =
-      Array.isArray(
-        this.structuredStateBaselineLines
-      )
-        ? this.structuredStateBaselineLines
-        : [];
-
-    let currentLines = allLines;
-
-    if (
-      baseline.length &&
-      allLines.length >= baseline.length
-    ) {
-      const prefixMatches =
-        baseline.every(
-          (line, index) =>
-            allLines[index] === line
-        );
-
-      if (prefixMatches) {
-        currentLines =
-          allLines.slice(
-            baseline.length
-          );
-      }
-    }
-
-    const messages = currentLines
-      .slice(-30)
-      .map((text, index) => ({
-        id: `message_${index + 1}`,
-        text:
-          this.redactRuntimeLabel(
-            text
-          ),
-      }));
-
-    const controls = [];
-    const seen = new Set();
-    const candidates = scope.locator(
-      'button, a, [role="button"], [role="option"], [role="link"], [role="menuitem"], [role="checkbox"], [role="radio"]'
-    );
-    const controlCount = Math.min(await candidates.count().catch(() => 0), 100);
-
-    for (let index = 0; index < controlCount; index += 1) {
-      const locator = candidates.nth(index);
-      if (!(await visible(locator, 150))) continue;
-      const rawLabel = String(
-        await locator.getAttribute('aria-label').catch(() => '') ||
-        await locator.innerText().catch(() => '') ||
-        await locator.getAttribute('title').catch(() => '') || ''
-      ).replace(/\s+/g, ' ').trim();
-      if (!rawLabel) continue;
-      const key = `${rawLabel}|${await locator.getAttribute('role').catch(() => '')}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const id = this.registerRuntimeElement(locator, 'control', { rawLabel });
-      controls.push({
-        id,
-        type: await locator.getAttribute('role').catch(() => null) ||
-          await locator.evaluate(el => el.tagName.toLowerCase()).catch(() => 'control'),
-        label: this.redactRuntimeLabel(rawLabel),
-        enabled: !(await locator.isDisabled().catch(() => false)) &&
-          await locator.getAttribute('aria-disabled').catch(() => null) !== 'true',
-      });
-    }
-
-    const inputs = [];
-    const inputCandidates = scope.locator('textarea, input:not([type="hidden"]), [contenteditable="true"], [role="textbox"]');
-    const inputCount = Math.min(await inputCandidates.count().catch(() => 0), 20);
-    for (let index = 0; index < inputCount; index += 1) {
-      const locator = inputCandidates.nth(index);
-      if (!(await visible(locator, 150))) continue;
-      const id = this.registerRuntimeElement(locator, 'input');
-      inputs.push({
-        id,
-        type: await locator.getAttribute('type').catch(() => null) || 'text',
-        placeholder: this.redactRuntimeLabel(
-          await locator.getAttribute('placeholder').catch(() => '') ||
-          await locator.getAttribute('aria-label').catch(() => '') || ''
-        ),
-        enabled: !(await locator.isDisabled().catch(() => false)) &&
-          await locator.getAttribute('aria-disabled').catch(() => null) !== 'true',
-      });
-    }
-
-    return {
-      surfaceReady: Boolean(surface && input),
-      busy: await this.isOliveBusy().catch(() => false),
-      messages,
-      controls,
-      inputs,
-      url: this.page.url(),
-      capturedAt: new Date().toISOString(),
-    };
-  }
-
-  async executeStructuredAction(action = {}) {
-    const kind = String(action.action || '').toUpperCase();
-    const targetId = String(action.targetId || '');
-    const value = String(action.value || '');
-
-    if (kind === 'WAIT') {
-      await this.page.waitForTimeout(Math.min(Math.max(Number(action.waitMs || 1200), 250), 10000));
-      return { executed: true, action: kind };
-    }
-    if (kind === 'COMPLETE' || kind === 'FAIL') {
-      return { executed: true, action: kind };
-    }
-
-    let entry = targetId ? this.runtimeElements.get(targetId) : null;
-    if (!entry && kind === 'SEND_MESSAGE') {
-      const firstInput = [...this.runtimeElements.values()].find(item => item.kind === 'input');
-      entry = firstInput || null;
-    }
-    if (!entry) throw new Error(`Runtime element not found: ${targetId || '<none>'}`);
-
-    const locator = entry.locator;
-    if (!(await visible(locator, 2000))) throw new Error(`Runtime element is no longer visible: ${targetId}`);
-
-    if (kind === 'CLICK') {
-      await locator.scrollIntoViewIfNeeded().catch(() => {});
-      await locator.click({ timeout: 10000 });
-    } else if (kind === 'TYPE' || kind === 'SEND_MESSAGE') {
-      if (!value.trim()) throw new Error(`${kind} requires a non-empty value.`);
-      await locator.click({ timeout: 10000 });
-      await locator.fill(value).catch(async () => {
-        await locator.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
-        await locator.type(value, { delay: 8 });
-      });
-      if (kind === 'SEND_MESSAGE') {
-        const surface = this.lastSurface || await this.findChatSurface({ timeout: 2000 });
-        const send = surface?.getByRole('button', { name: /^send$/i }).last();
-        const sendReady = send && await visible(send, 800) && await send.isEnabled().catch(() => false);
-        if (sendReady) await send.click({ timeout: 5000 });
-        else await locator.press('Enter');
-      }
-    } else {
-      throw new Error(`Unsupported structured action: ${kind}`);
-    }
-
-    await this.page.waitForTimeout(600);
-    return { executed: true, action: kind, targetId };
-  }
-
-  async clickControl(targetText) {
-    const beforeLines =
-      await this.readChatLines();
-
-    const value =
-      String(targetText || '')
-        .replace(/^text:\s*/i, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-    if (!value) {
-      throw new Error(
-        'Olive control text is required.'
-      );
-    }
-
-    const surface =
-      this.lastSurface ||
-      await this.findChatSurface({
-        timeout: 5000,
-      });
-
-    if (!surface) {
-      throw new Error(
-        'Olive chat surface is not available.'
-      );
-    }
-
-    /*
-     * Do not build a RegExp from user-visible text because order
-     * labels can contain punctuation. Use exact accessible text
-     * first, then exact visible text.
-     */
-    /*
-     * Business placeholders are resolved entirely inside Playwright.
-     * Customer order identifiers remain local and are never sent to
-     * the planner.
-     */
-    const candidates = [
-      surface.getByRole(
-        'button',
-        {
-          name: value,
-          exact: true,
-        }
-      ),
-      surface.getByRole(
-        'option',
-        {
-          name: value,
-          exact: true,
-        }
-      ),
-      surface.getByRole(
-        'link',
-        {
-          name: value,
-          exact: true,
-        }
-      ),
-      surface.getByText(
-        value,
-        {
-          exact: true,
-        }
-      ),
-    ];
-
-    for (const candidateGroup of candidates) {
-      const count =
-        await candidateGroup
-          .count()
-          .catch(() => 0);
-
-      for (
-        let index = 0;
-        index < count;
-        index += 1
-      ) {
-        const candidate =
-          candidateGroup.nth(index);
-
-        const isVisible =
-          await candidate
-            .isVisible({
-              timeout: 1000,
-            })
-            .catch(() => false);
-
-        if (!isVisible) {
-          continue;
-        }
-
-        await candidate
-          .scrollIntoViewIfNeeded()
-          .catch(() => {});
-
-        try {
-          await candidate.click({
-            timeout: 10000,
-          });
-
-          console.log(
-            `[Olive] Clicked control: ${value}`
-          );
-
-          const response =
-            await this.waitForResponseDelta(
-              beforeLines,
-              ''
-            );
-
-          return {
-            clicked: true,
-            targetText: value,
-            surface:
-              surface === this.page
-                ? 'page'
-                : 'frame',
-            botResponse:
-              response.botResponse,
-            newBotMessages:
-              response.newBotMessages,
-            newBotMessageCount:
-              response.newBotMessages.length,
-            conversationState:
-              detectConversationState(
-                response.botResponse
-              ),
-          };
-        } catch (_) {
-          /*
-           * Some Olive options are rendered as clickable parent
-           * containers while the matching text is on a child node.
-           */
-          const parentClickable =
-            candidate.locator(
-              'xpath=ancestor-or-self::*[' +
-              '@role="button" or ' +
-              '@role="option" or ' +
-              '@role="link" or ' +
-              'self::button or self::a' +
-              '][1]'
-            );
-
-          if (
-            await parentClickable
-              .isVisible({
-                timeout: 500,
-              })
-              .catch(() => false)
-          ) {
-            await parentClickable.click({
-              timeout: 10000,
-            });
-
-            console.log(
-              `[Olive] Clicked parent control: ${value}`
-            );
-
-            const response =
-              await this.waitForResponseDelta(
-                beforeLines,
-                ''
-              );
-
-            return {
-              clicked: true,
-              targetText: value,
-              surface:
-                surface === this.page
-                  ? 'page'
-                  : 'frame',
-              botResponse:
-                response.botResponse,
-              newBotMessages:
-                response.newBotMessages,
-              newBotMessageCount:
-                response.newBotMessages.length,
-              conversationState:
-                detectConversationState(
-                  response.botResponse
-                ),
-            };
-          }
-        }
-      }
-    }
-
-    throw new Error(
-      `Visible Olive control was not found: ${value}`
-    );
-  }
-
-  async readVisibleOrderControls() {
-    const surface =
-      this.lastSurface ||
-      await this.findChatSurface({
-        timeout: 1500,
-      });
-
-    if (!surface) {
-      return [];
-    }
-
-    const orderPattern =
-      /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b[\s\S]{0,80}\b\d{6,}\b/i;
-
-    const groups = [
-      surface.getByRole('button'),
-      surface.getByRole('option'),
-      surface.getByRole('link'),
-      surface.locator(
-        'button, [role="button"], [role="option"], a'
-      ),
-    ];
-
-    const labels = [];
-    const seen = new Set();
-
-    for (const group of groups) {
-      const count =
-        Math.min(
-          await group
-            .count()
-            .catch(() => 0),
-          100
-        );
-
-      for (
-        let index = 0;
-        index < count;
-        index += 1
-      ) {
-        const candidate =
-          group.nth(index);
-
-        const visible =
-          await candidate
-            .isVisible({
-              timeout: 100,
-            })
-            .catch(() => false);
-
-        if (!visible) {
-          continue;
-        }
-
-        const label =
-          String(
-            await candidate
-              .innerText()
-              .catch(() => '') ||
-            await candidate
-              .getAttribute(
-                'aria-label'
-              )
-              .catch(() => '') ||
-            ''
-          )
-            .replace(/^text:\s*/i, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-
-        if (
-          !label ||
-          !orderPattern.test(label) ||
-          seen.has(label)
-        ) {
-          continue;
-        }
-
-        seen.add(label);
-        labels.push(label);
-      }
-    }
-
-    return labels;
-  }
-
-  async waitForOrderControlDelta(
-    beforeControls,
-    timeoutMs
-  ) {
-    const before =
-      new Set(
-        (beforeControls || [])
-          .map(value =>
-            String(value || '')
-              .replace(/\s+/g, ' ')
-              .trim()
-          )
-          .filter(Boolean)
-      );
-
-    const deadline =
-      Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      const current =
-        await this
-          .readVisibleOrderControls()
-          .catch(() => []);
-
-      const added =
-        current.filter(
-          value =>
-            !before.has(value)
-        );
-
-      if (added.length) {
-        /*
-         * Require a short quiet period so all order options can
-         * finish rendering before returning.
-         */
-        await this.page.waitForTimeout(
-          Number(
-            process.env
-              .OLIVE_ORDER_CONTROL_QUIET_MS ||
-            1200
-          )
-        );
-
-        const finalControls =
-          await this
-            .readVisibleOrderControls()
-            .catch(() => added);
-
-        const finalAdded =
-          finalControls.filter(
-            value =>
-              !before.has(value)
-          );
-
-        return {
-          botResponse:
-            finalAdded.join('\n'),
-          newBotMessages:
-            finalAdded,
-          detectedBy:
-            'visible_order_controls',
-        };
-      }
-
-      await this.page.waitForTimeout(300);
-    }
-
-    throw new Error(
-      'Timed out waiting for visible Olive order controls.'
-    );
-  }
-
   async sendMessage(userMessage) {
     const surface =
       await this.findChatSurface({
@@ -1723,11 +1136,6 @@ class OliveWebBot {
      */
     const beforeLines =
       await this.readChatLines();
-
-    const beforeOrderControls =
-      await this
-        .readVisibleOrderControls()
-        .catch(() => []);
 
     await input.click({
       timeout: 10000,
@@ -1764,38 +1172,11 @@ class OliveWebBot {
       await input.press('Enter');
     }
 
-    const responseTimeoutMs =
-      Number(
-        process.env
-          .OLIVE_RESPONSE_TIMEOUT_MS ||
-        this.responseTimeout
-      );
-
-    const textDeltaPromise =
-      this.waitForResponseDelta(
+    const result =
+      await this.waitForResponseDelta(
         beforeLines,
         userMessage
       );
-
-    const orderControlPromise =
-      this.waitForOrderControlDelta(
-        beforeOrderControls,
-        responseTimeoutMs
-      );
-
-    let result;
-
-    try {
-      result =
-        await Promise.any([
-          textDeltaPromise,
-          orderControlPromise,
-        ]);
-    } catch (error) {
-      throw new Error(
-        `Timed out waiting for Olive response to: "${userMessage}"`
-      );
-    }
 
     let screenshotPath = null;
 
@@ -2105,90 +1486,6 @@ class OliveWebBot {
           `Could not dump controls: ` +
           `${error.message}`
       );
-  }
-
-  async ensureAuthenticated({ targetUrl, required = true } = {}) {
-    if (!targetUrl) throw new Error('ensureAuthenticated requires targetUrl.');
-
-    const storagePath = process.env.PLAYWRIGHT_STORAGE_STATE || path.resolve(
-      process.cwd(),
-      'artifacts',
-      '.auth',
-      `woolworths-${String(process.env.TARGET_ENV || 'uat').toLowerCase()}.json`
-    );
-    const deterministicLoginEnabled = String(
-      process.env.GENERATED_SPEC_DETERMINISTIC_AUTH ??
-      process.env.MCP_DETERMINISTIC_AUTH ??
-      'true'
-    ).toLowerCase() !== 'false';
-
-    if (deterministicLoginEnabled) {
-      await performDeterministicWebLogin(this.page, targetUrl);
-      fs.mkdirSync(path.dirname(storagePath), { recursive: true });
-      await this.page.context().storageState({ path: storagePath });
-      return { authenticated: true, mode: 'deterministic-login', storageStatePath: storagePath };
-    }
-
-    if (!fs.existsSync(storagePath)) {
-      if (required) throw new Error(`Authenticated storage state is missing: ${storagePath}`);
-      await this.goto(targetUrl);
-      return { authenticated: false, mode: 'anonymous', storageStatePath: null };
-    }
-
-    const state = JSON.parse(fs.readFileSync(storagePath, 'utf8'));
-    if (Array.isArray(state.cookies) && state.cookies.length) await this.page.context().addCookies(state.cookies);
-    await this.goto(targetUrl);
-    for (const origin of state.origins || []) {
-      if (!origin?.origin || !Array.isArray(origin.localStorage)) continue;
-      if (!this.page.url().startsWith(origin.origin)) await this.page.goto(origin.origin, { waitUntil: 'domcontentloaded' });
-      await this.page.evaluate(items => { for (const item of items) localStorage.setItem(item.name, item.value); }, origin.localStorage);
-    }
-    await this.goto(targetUrl);
-    if (/\/u\/login|\/authorize|auth0/i.test(this.page.url())) {
-      throw new Error(`Authenticated storage state is expired: ${storagePath}`);
-    }
-    return { authenticated: true, mode: 'storage-state', storageStatePath: storagePath };
-  }
-
-  async runGeneratedJourney({ scenario, maxTurns = 25, options = {}, onStep } = {}) {
-    const { runGeneratedJourney } = require('./generative/semanticJourney');
-    return runGeneratedJourney({
-      scenario, maxTurns, options, onStep,
-      adapter: {
-        captureState: async () => ({
-          chat: await this.captureStructuredState(),
-          page: { surfaceReady: true, busy: false, messages: [], controls: [], inputs: [], text: [], url: this.page.url(), title: await this.page.title().catch(() => '') },
-        }),
-        executeAction: action => this.executeStructuredAction(action),
-      },
-    });
-  }
-
-  async runSemanticJourney({ scenario, maxTurns = 25, options = {}, onTurn } = {}) {
-    const { runSemanticJourney } = require('./generative/semanticJourney');
-    await this.open();
-    return runSemanticJourney({
-      scenario,
-      maxTurns,
-      options,
-      onTurn,
-      adapter: {
-        captureState: async () => ({
-          chat: await this.captureStructuredState(),
-          page: {
-            surfaceReady: true,
-            busy: false,
-            messages: [],
-            controls: [],
-            inputs: [],
-            text: [],
-            url: this.page.url(),
-            title: await this.page.title().catch(() => ''),
-          },
-        }),
-        executeAction: action => this.executeStructuredAction(action),
-      },
-    });
   }
 
   async screenshot(name) {

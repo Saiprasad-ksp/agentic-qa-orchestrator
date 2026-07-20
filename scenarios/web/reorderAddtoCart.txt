@@ -1,45 +1,88 @@
-TITLE: Olive Agent Handover and End-to-End Chat Validation
+TITLE: Olive Reorder, Cart Verification and Recovery Handover
 
 PLATFORM: Web
+EXECUTION_MODE: CHAT_DELTA
 AUTH_REQUIRED: true
 AUTH_FLOW: Deterministic
-
-TARGET_PATH: /olive-chatbot/auth-flow/reorder
-
+TARGET_PATH: /
 TEST_TYPE: Generative
+ALLOW_PRODUCTION: false
 
 BRAND: Woolworths
-
-BOT_NAME: Olive Bot
-
-TAGS: @woolworths, @web
+BOT_NAME: Olive
+TAGS: @web @loggedin @reorder @cart-verification @recovery @agent-handover @regression
 
 GOAL:
-Verify the Olive chat agent handover and ensure that the bot can handle various user interactions correctly.
+Reorder items from the first eligible recent order, verify that the items were actually added to the shopping cart, and use Olive's recovery path when the cart was not updated. Pass when either the cart is verified successfully or Olive proceeds to human-agent connection after the recovery option is selected.
 
-CONVERSATION_STRATEGY:
-1. Open the Olive chatbot web in auth flow as "reorder".
-2. Reload the chat widget to create a new session.
-3. Dismiss any popup window or screen left from previous chats.
-4. Type "Reorder" in the chatbot and validate the response.
-5. Click on an order from the recent orders list and validate the response.
-6. Click on the "Add to cart" button and validate the response.
-7. Type "Reorder cancelled order" and validate the response.
-8. Confirm or deny the reorder request and validate the subsequent responses.
-9. Continue interacting with the chatbot as needed.
+RULES:
+- Use only runtime-discovered orders, controls and inputs.
+- Do not hardcode order numbers, dates, control IDs or exact Olive wording.
+- Validate responses semantically and adapt to valid follow-up questions.
+- Visible chips and buttons are actions, not bot failure messages.
+- The presence of an "It didn't work" chip does not itself mean failure.
+- Do not expose customer-specific order data to the LLM or shareable report.
+- Do not run against production.
 
-EXPECTATIONS:
-- The bot should respond appropriately to user inputs related to reordering.
-- The bot should handle agent handovers seamlessly.
-- The bot should provide accurate information about recent orders and allow users to add items to their cart.
+EXECUTION_FLOW:
 
-ALLOWED_INTERMEDIATE_STATES:
-- Chatbot is in the initial state after opening.
-- Chatbot is displaying a list of recent orders.
-- User has selected an order from the list.
-- User has clicked on the "Add to cart" button.
-- User has confirmed or denied a reorder request.
+1. Open the configured environment and confirm deterministic login is active.
 
-MAX_CUSTOMER_TURNS: 10
+2. Open Olive and start a clean conversation.
 
-MIN_MEANINGFUL_RESPONSES: 5
+3. Send:
+   Reorder
+
+4. Continue the conversation generatively until Olive presents one or more recent-order choices.
+
+5. Select the first eligible recent order using its runtime control.
+
+6. Continue until Olive presents an Add to cart control.
+
+7. Click Add to cart.
+
+8. Wait for Olive and the Woolworths page/cart state to finish updating.
+
+9. Verify the cart using observable application evidence:
+   - open or inspect the shopping cart;
+   - confirm that products from the selected reorder are present, or that the cart item count/content increased consistently with the action;
+   - do not rely only on Olive's success message.
+
+10. When the cart contains the reordered items:
+    - treat Olive's success confirmation as supporting evidence;
+    - capture screenshot and cart evidence;
+    - mark the scenario COMPLETE and PASSED.
+
+11. When the reordered items are not present in the cart:
+    - return to the Olive conversation;
+    - locate and click the visible recovery control semantically equivalent to:
+      It didn't work
+
+12. Continue the recovery conversation generatively.
+
+13. When Olive offers, starts or requests confirmation for human-agent support:
+    - select the appropriate human-agent option when required;
+    - validate an observable handover, queueing, connecting or connected state.
+
+14. Mark the scenario COMPLETE and PASSED when either:
+    - the reordered items are verified in the cart; or
+    - after the failed cart verification and recovery action, Olive enters a genuine human-agent handover flow.
+
+15. Capture screenshots and retain video, transcript, semantic decisions and runtime evidence in the existing report.
+
+PASS_CONDITIONS:
+- PASS: reordered items are visibly present in the cart.
+- PASS: cart verification fails, "It didn't work" is selected, and Olive enters a genuine agent-handover/queue/connecting state.
+
+FAILURE_CONDITIONS:
+- Deterministic login fails or the authenticated session is lost.
+- Olive cannot be opened or the conversation cannot continue.
+- No eligible recent order is available.
+- Add to cart cannot be reached or clicked.
+- Cart verification is inconclusive after reasonable retries and no recovery control is available.
+- The recovery control is selected but Olive neither resolves the issue nor offers/enters human-agent support.
+- The conversation loops without progress or reaches the maximum turn limit.
+- Sensitive customer data is exposed.
+
+MAX_CUSTOMER_TURNS: 20
+MIN_MEANINGFUL_RESPONSES: 4

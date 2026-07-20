@@ -30,3 +30,12 @@ actions-runner/
 
 # Local framework credentials
 .credentials/
+backups/
+*.bak
+*.backup
+*.backup-*
+*.before-*
+*.bak
+*.backup
+*.backup-*
+*.before-*

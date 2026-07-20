@@ -14,12 +14,13 @@
     "test:mobile:android": "MOBILE_PLATFORM=android npx wdio run wdio.conf.js",
     "test:mobile:ios": "MOBILE_PLATFORM=ios npx wdio run wdio.conf.js",
     "cleanup:runs": "node scripts/cleanup-run-history.js",
-    "report:build": "node scripts/build-shareable-report.js qa-report",
-    "report:open": "open reports/shareable/qa-report.html",
+    "report:build": "node scripts/build-shareable-report.js",
+    "report:open": "open \"$(find reports/runs -name \"*-report.html\" -type f -print0 | xargs -0 ls -t | head -1)\"",
     "mcp:web": "node mcp-server.js",
     "mcp:mobile": "node mcp-mobile-server.js",
     "mcp:qa": "node mcp/qa-framework-mcp.js",
-    "check": "node scripts/check-project.js"
+    "check": "node scripts/check-project.js",
+    "test": "node scripts/smoke-test.js && npm run check"
   },
   "keywords": [],
   "author": "",

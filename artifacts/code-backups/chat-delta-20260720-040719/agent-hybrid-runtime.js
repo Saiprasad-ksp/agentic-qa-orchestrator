@@ -1,0 +1,902 @@
+const path = require('path');
+const fs = require('fs');
+const { spawnSync } = require('child_process');
+const { generateHtmlReport } = require('./generate-rich-report.js');
+const { judgeChatbotResponse } = require('./src/llmJudge');
+const { loadProjectEnv, readEnv, requireEnv } = require('./src/env');
+const { GoogleGenAI } = require('@google/genai');
+const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+
+loadProjectEnv('.env.web', '.env.mobile', '.env.llm', '.env.browserstack');
+
+if (process.env.GOOGLE_APPLICATION_CREDENTIALS && !path.isAbsolute(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = path.resolve(__dirname, process.env.GOOGLE_APPLICATION_CREDENTIALS);
+}
+
+const scenariosDir = path.resolve(__dirname, 'scenarios');
+const specsDir = path.resolve(__dirname, 'generated-specs');
+const reportsDir = path.resolve(__dirname, 'reports');
+const screenshotDir = path.resolve(__dirname, 'reports/screenshots');
+const transcriptDir = path.resolve(__dirname, 'reports/transcripts');
+
+for (const dir of [specsDir, reportsDir, screenshotDir, transcriptDir]) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+const scenarioArg = process.argv[2];
+
+if (!scenarioArg) {
+  console.error('❌ Error: Please specify a scenario filename. Usage: node agent-hybrid-client.js <scenario-file-name.txt>');
+  process.exit(1);
+}
+
+const scenarioPath = path.join(scenariosDir, scenarioArg);
+
+if (!fs.existsSync(scenarioPath)) {
+  console.error(`❌ Error: Scenario file not found: ${scenarioPath}`);
+  process.exit(1);
+}
+
+const targetScenario = fs.readFileSync(scenarioPath, 'utf-8');
+const baseName = path.basename(scenarioArg, '.txt');
+const isWeb = targetScenario.toUpperCase().includes('PLATFORM: WEB');
+const platformName = isWeb ? 'Web (local Playwright MCP server)' : 'Mobile (local Appium/WebdriverIO MCP server)';
+const executionTarget = readEnv('RUN_TARGET', 'local').toLowerCase();
+const isBrowserStack = executionTarget === 'browserstack';
+
+const targetEnv = readEnv('TARGET_ENV', 'PROD').toUpperCase();
+const isDiscoveryMode =
+  readEnv('AGENT_RUN_MODE', 'execute').toLowerCase() === 'discover';
+
+const targetBaseUrl = targetEnv === 'PROD'
+  ? readEnv('URL_PROD', 'https://www.woolworths.com.au')
+  : readEnv('URL_UAT', 'https://uatsite.woolworths.com.au');
+
+function readScenarioValue(key) {
+  const pattern = new RegExp(
+    `^${key.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}:\\\\s*(.+)$`,
+    'im'
+  );
+
+  return targetScenario.match(pattern)?.[1]?.trim() || '';
+}
+
+function resolveScenarioTargetUrl() {
+  const explicitTargetUrl = readScenarioValue('TARGET_URL');
+  const explicitTargetPath = readScenarioValue('TARGET_PATH');
+
+  if (explicitTargetUrl) {
+    return explicitTargetUrl;
+  }
+
+  if (explicitTargetPath) {
+    const normalisedPath = explicitTargetPath.startsWith('/')
+      ? explicitTargetPath
+      : `/${explicitTargetPath}`;
+
+    return `${targetBaseUrl.replace(/\/$/, '')}${normalisedPath}`;
+  }
+
+  const isHelpCenterScenario =
+    /@helpcenter\\b/i.test(targetScenario) ||
+    /^PAGE:\\s*Help Centre/im.test(targetScenario) ||
+    /helpcenter|help-centre|help_centre|faq-audit/i.test(scenarioArg);
+
+  if (isHelpCenterScenario) {
+    return readEnv(
+      'HELP_CENTER_WEB_URL',
+      `${targetBaseUrl.replace(/\/$/, '')}/shop/help`
+    );
+  }
+
+  return targetBaseUrl;
+}
+
+const targetUrl = resolveScenarioTargetUrl();
+
+function createGeminiClient() {
+  const authMode = readEnv('GEMINI_AUTH_MODE', 'api_key').toLowerCase();
+
+  if (authMode === 'vertex') {
+    const project = readEnv('GOOGLE_CLOUD_PROJECT') || readEnv('GCP_PROJECT_ID');
+    const location = readEnv('GOOGLE_CLOUD_LOCATION') || readEnv('GCP_LOCATION', 'us-central1');
+
+    if (!project) {
+      throw new Error('GEMINI_AUTH_MODE=vertex requires GOOGLE_CLOUD_PROJECT or GCP_PROJECT_ID.');
+    }
+
+    if (!readEnv('GOOGLE_APPLICATION_CREDENTIALS')) {
+      throw new Error('GEMINI_AUTH_MODE=vertex requires GOOGLE_APPLICATION_CREDENTIALS.');
+    }
+
+    return new GoogleGenAI({ vertexai: true, project, location });
+  }
+
+  return new GoogleGenAI({
+    apiKey: requireEnv('GEMINI_API_KEY', 'Or configure Vertex AI in .env.llm.'),
+  });
+}
+
+function cleanGeneratedCode(code) {
+  return String(code || '')
+    .replace(/^```(?:javascript|js|ts|typescript)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim() + '\n';
+}
+
+function getToolText(result) {
+  if (!result || !Array.isArray(result.content)) return '';
+  return result.content.map(item => item.text || '').filter(Boolean).join('\n');
+}
+
+function preview(value, max = 1800) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  if (!text) return '';
+  return text.length > max ? `${text.slice(0, max)}\n...truncated...` : text;
+}
+
+
+function filterSpecGenerationTool(tools) {
+  const availableTools = Array.isArray(tools) ? tools : [];
+  const autoSaveSpec =
+    readEnv('AUTO_SAVE_SPEC', 'false').toLowerCase() === 'true';
+
+  const removeSpecTool = isDiscoveryMode || !autoSaveSpec;
+
+  if (!removeSpecTool) {
+    return availableTools;
+  }
+
+  return availableTools
+    .map((tool) => {
+      if (!tool || typeof tool !== 'object') {
+        return tool;
+      }
+
+      if (tool.name === 'save_spec_file') {
+        return null;
+      }
+
+      if (Array.isArray(tool.functionDeclarations)) {
+        return {
+          ...tool,
+          functionDeclarations: tool.functionDeclarations.filter(
+            (declaration) =>
+              declaration &&
+              declaration.name !== 'save_spec_file'
+          ),
+        };
+      }
+
+      return tool;
+    })
+    .filter(Boolean);
+}
+
+function extractScreenshotPaths(text) {
+  const value = String(text || '');
+  const paths = new Set();
+
+  const jsonPathRegex = /"(?:actualPath|baselinePath|diffPath|screenshot|path)"\s*:\s*"([^"]+\.png)"/gi;
+  let jsonMatch;
+  while ((jsonMatch = jsonPathRegex.exec(value)) !== null) {
+    paths.add(jsonMatch[1]);
+  }
+
+  const labelledLineRegex = /(?:Screenshot saved to|Screenshot:|Actual:|Baseline:|Diff:)\s*(.+?\.png)\s*$/gim;
+  let labelledMatch;
+  while ((labelledMatch = labelledLineRegex.exec(value)) !== null) {
+    paths.add(labelledMatch[1].trim());
+  }
+
+  for (const line of value.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('/') && trimmed.endsWith('.png')) {
+      paths.add(trimmed);
+    }
+  }
+
+  return [...paths];
+}
+
+function parseToolJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    const match = String(text || '').match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch (__) {
+      return null;
+    }
+  }
+}
+
+function mcpTransportConfig() {
+  const mode = readEnv('MCP_SERVER_MODE', 'local').toLowerCase();
+
+  /*
+   * StdioClientTransport does not automatically forward every custom
+   * environment variable. Explicitly pass the parent environment so the
+   * MCP server receives runner settings, BrowserStack credentials, URL
+   * configuration and Olive timeout values.
+   */
+  const childEnv = Object.fromEntries(
+    Object.entries(process.env)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, String(value)])
+  );
+
+  if (mode === 'official') {
+    return {
+      command: 'npx',
+      args: isWeb
+        ? ['-y', '@playwright/mcp@latest']
+        : ['-y', 'appium-mcp@latest'],
+      stderr: 'inherit',
+      env: childEnv,
+    };
+  }
+
+  return {
+    command: process.execPath,
+    args: [
+      path.resolve(
+        __dirname,
+        isWeb
+          ? 'mcp-server.js'
+          : 'mcp-mobile-server.js'
+      ),
+    ],
+    stderr: 'inherit',
+    env: childEnv,
+  };
+}
+
+function recordUsage(metrics, response, turnLabel) {
+  const usage = response && response.usageMetadata;
+  if (!usage) return;
+
+  metrics.tokenEvents.push({
+    turn: turnLabel,
+    promptTokenCount: usage.promptTokenCount,
+    candidatesTokenCount: usage.candidatesTokenCount,
+    totalTokenCount: usage.totalTokenCount,
+  });
+
+  metrics.totalTokens += Number(usage.totalTokenCount || 0);
+}
+
+function attachScreenshots(metrics, outputText) {
+  for (const shotPath of extractScreenshotPaths(outputText)) {
+    if (!fs.existsSync(shotPath)) continue;
+
+    const exists = metrics.screenshots.some(s => s.path === shotPath);
+    if (exists) continue;
+
+    metrics.screenshots.push({
+      label: path.basename(shotPath),
+      path: shotPath,
+      base64: fs.readFileSync(shotPath, 'base64'),
+    });
+  }
+}
+
+function writeJson(filePath, data) {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+function buildRunMetrics() {
+  return {
+    scenarioName: baseName,
+    platform: platformName,
+    executionTarget: executionTarget.toUpperCase(),
+    targetUrl,
+    model: readEnv('GEMINI_MODEL', 'gemini-2.5-flash'),
+    llmAuthMode: readEnv('GEMINI_AUTH_MODE', 'api_key'),
+    headless: process.env.HEADLESS !== 'false',
+    startedAt: new Date().toISOString(),
+    endedAt: null,
+    durationMs: 0,
+    totalTokens: 0,
+    steps: [],
+    validations: [],
+    tokenEvents: [],
+    screenshots: [],
+    visualComparisons: [],
+    savedSpecPath: null,
+    metricsJsonPath: null,
+    transcriptJsonPath: null,
+    transcript: [],
+  };
+}
+
+function readScenarioHeader(text, key, fallback = '') {
+  const pattern = new RegExp(
+    `^${key.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}:\\s*(.+)$`,
+    'im',
+  );
+
+  const match = String(text || '').match(pattern);
+  return match ? match[1].trim() : fallback;
+}
+
+function resolveExecutionMode(text) {
+  return readScenarioHeader(
+    text,
+    'EXECUTION_MODE',
+    'AGENTIC',
+  ).toUpperCase();
+}
+
+async function executeGenerativeFlow(scenarioText) {
+  const executionMode = resolveExecutionMode(scenarioText);
+
+  console.log(`🧭 Execution mode: ${executionMode}`);
+
+  console.log(
+    `\n🚀 Initialising ${
+      process.env.BOT_NAME ||
+      process.env.QA_BOT_NAME ||
+      'chatbot'
+    } generative QA agent...`
+  );
+  console.log(`⚙️  Platform: ${platformName}`);
+  console.log(`🎯 Execution target: ${executionTarget.toUpperCase()}`);
+  if (isWeb) console.log(`🌍 URL: ${targetUrl}`);
+
+  const metrics = buildRunMetrics();
+  const runStartMs = Date.now();
+
+  const transport = new StdioClientTransport(mcpTransportConfig());
+  const mcpClient = new Client(
+    { name: 'olive-qa-mcp-client', version: '5.0.0' },
+    { capabilities: {} },
+  );
+
+  await mcpClient.connect(transport);
+
+  const mcpTools = await mcpClient.listTools();
+
+  const geminiTools = mcpTools.tools.map(tool => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.inputSchema,
+  }));
+
+  geminiTools.push({
+    name: 'verify_generative_response',
+    description: 'LLM-as-a-judge semantic validation for Olive chatbot responses. Use this instead of exact text matching for generative responses.',
+    parameters: {
+      type: 'object',
+      properties: {
+        userMessage: { type: 'string' },
+        botResponse: { type: 'string' },
+        expectedIntent: { type: 'string' },
+        acceptanceCriteria: { type: 'array', items: { type: 'string' } },
+        blockedPatterns: { type: 'array', items: { type: 'string' } },
+        currentState: { type: 'string' },
+        allowedNextStates: { type: 'array', items: { type: 'string' } },
+        flowId: { type: 'string' },
+        flowContext: { type: 'object' },
+      },
+      required: ['userMessage', 'botResponse', 'expectedIntent'],
+    },
+  });
+
+  geminiTools.push({
+    name: 'save_spec_file',
+    description: 'Write the final deterministic Playwright or WebdriverIO spec to generated-specs.',
+    parameters: {
+      type: 'object',
+      properties: {
+        filename: {
+          type: 'string',
+          description: 'Optional filename ending with .spec.js. Defaults to the scenario name.',
+        },
+        codeContent: {
+          type: 'string',
+          description: 'Complete executable JavaScript spec code.',
+        },
+      },
+      required: ['codeContent'],
+    },
+  });
+
+  const ai = createGeminiClient();
+  const model = readEnv('GEMINI_MODEL', 'gemini-2.5-flash');
+
+  const systemInstruction = `
+You are an expert autonomous QA engineering agent for Woolworths Olive.
+
+Use MCP tools to execute the scenario. Do not invent tool results.
+
+Critical rules:
+- Use semantic validation for generative Olive answers. Never exact-match full chatbot responses.
+- For web Olive tests, use this order: pw_navigate -> pw_open_olive -> pw_send_olive_message -> verify_generative_response.
+- When pw_send_olive_message returns JSON, extract botResponse and pass it to verify_generative_response.
+- Never send fullConversation, whole-page text, or unrelated page controls back to Gemini.
+- Treat login, order selection, item selection, and escalation as valid intermediate states when allowed by the scenario or flow context.
+${isDiscoveryMode
+  ? `- DISCOVERY MODE is active.
+- Execute the complete business scenario against the real page.
+- Collect runtime evidence, screenshots, URLs, tool results and observable UI states.
+- Do not generate, write, save or request a spec file.
+- Do not call save_spec_file.
+- When the requested exploration is complete, return a concise final summary with no function call.`
+  : `- Save generated specs using save_spec_file only after runtime evidence exists.`}
+- Generated web specs must be CommonJS JavaScript.
+- Generated web specs must be executable CommonJS JavaScript.
+
+For Help Centre / FAQ / visual / exploratory specs, generate code that imports only real existing helpers:
+  const { test, expect } = require('@playwright/test');
+  const { loadProjectEnv, readEnv } = require('../../src/env');
+  const { VisualValidator } = require('../../src/visualValidator');
+  const { runAdvancedHelpCenterExploration } = require('../../src/helpCenterAdvancedExplorer');
+
+Do not invent APIs.
+Do not generate comments instead of executable code.
+Do not use expect(page).toHaveVisualRegression().
+Do not call olive.auditLinksButtons().
+Do not call olive.exploreHelpCenter().
+Do not import LLMJudge.
+Do not use TypeScript annotations.
+
+The generated Help Centre spec must:
+- resolve URL from env using TARGET_ENV, URL_PROD, URL_UAT, HELP_CENTER_WEB_URL
+- navigate to the Help Centre URL
+- capture landing screenshot
+- call VisualValidator.captureAndCompare('web_help_centre_faq_landing')
+- attach baseline and actual images
+- attach diff and overlay images only when visualResult.hasDifference is true
+- assert visualResult.passed is true
+- call runAdvancedHelpCenterExploration(page, ...)
+- attach exploration JSON and screenshots
+- assert key exploration counts are greater than zero
+- save audit/exploration JSON under reports/audits
+- run without LLM on future executions
+- Do not hardcode usernames, access keys, API keys, service-account paths, passwords, or personal data in generated specs.
+- BrowserStack credentials must be read from BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY.
+- Gemini settings must be read from GEMINI_API_KEY or Vertex AI environment variables.
+`;
+
+  const chat = ai.chats.create({
+    model,
+    config: {
+      systemInstruction,
+      tools: filterSpecGenerationTool([{ functionDeclarations: geminiTools }]),
+      temperature: 0.1,
+    },
+  });
+
+  let response;
+  let testFailed = false;
+  let consecutiveErrors = 0;
+  let executionTurnCount = 0;
+  const maxTurns = Number(readEnv('AGENT_MAX_TURNS', '30'));
+
+  try {
+    response = await chat.sendMessage({ message: scenarioText });
+    recordUsage(metrics, response, 'Initial planning');
+
+    if (!response.functionCalls || response.functionCalls.length === 0) {
+      response = await chat.sendMessage({
+        message: isWeb
+          ? `Start execution now. First call pw_navigate with URL ${targetUrl}, then open Olive.`
+          : 'Start execution now. First call mobile_start_session.',
+      });
+      recordUsage(metrics, response, 'Forced execution start');
+    }
+
+    while (response.functionCalls && response.functionCalls.length > 0) {
+      if (executionTurnCount >= maxTurns) {
+        if (!isDiscoveryMode) {
+          testFailed = true;
+        }
+
+        console.error(
+          `⚠️ Reached AGENT_MAX_TURNS=${maxTurns}. ` +
+          `Stopping further tool execution.`
+        );
+        break;
+      }
+
+      const functionCall = response.functionCalls[0];
+      executionTurnCount += 1;
+
+      const stepStart = Date.now();
+      const stepRecord = {
+        turn: executionTurnCount,
+        name: functionCall.name,
+        status: 'RUNNING',
+        durationMs: 0,
+        tokenCount: response.usageMetadata ? response.usageMetadata.totalTokenCount : undefined,
+        argsPreview: preview(functionCall.args || {}),
+        outputPreview: '',
+      };
+
+      console.log(`\n[Turn ${executionTurnCount}] 🤖 AI -> ${functionCall.name}`);
+      if (functionCall.args) console.log(`👉 Args: ${JSON.stringify(functionCall.args)}`);
+
+      let toolOutput = '';
+      let isError = false;
+
+      if (functionCall.name === 'verify_generative_response') {
+        const judgement = await judgeChatbotResponse({
+          userMessage: functionCall.args.userMessage,
+          botResponse: functionCall.args.botResponse,
+          expectedIntent: functionCall.args.expectedIntent,
+          acceptanceCriteria: functionCall.args.acceptanceCriteria || [],
+          blockedPatterns: functionCall.args.blockedPatterns || [],
+          currentState: functionCall.args.currentState || 'START',
+          allowedNextStates: functionCall.args.allowedNextStates || [],
+          flowId: functionCall.args.flowId || '',
+          flowContext: functionCall.args.flowContext || null,
+        });
+
+        isError = !judgement.passed;
+        toolOutput = JSON.stringify(judgement, null, 2);
+
+        const validationRecord = {
+          turn: executionTurnCount,
+          userMessage: functionCall.args.userMessage,
+          botResponse: functionCall.args.botResponse,
+          expectedIntent: functionCall.args.expectedIntent,
+          acceptanceCriteria: functionCall.args.acceptanceCriteria || [],
+          blockedPatterns: functionCall.args.blockedPatterns || [],
+          currentState: functionCall.args.currentState || 'START',
+          allowedNextStates: functionCall.args.allowedNextStates || [],
+          flowId: functionCall.args.flowId || '',
+          detectedState: judgement.detectedState,
+          transitionValid: judgement.transitionValid,
+          judgeMode: judgement.judgeMode,
+          passed: Boolean(judgement.passed),
+          score: Number(judgement.score || 0),
+          intentMatched: judgement.intentMatched,
+          safe: judgement.safe,
+          hallucinationRisk: judgement.hallucinationRisk,
+          missing: judgement.missing || [],
+          issues: judgement.issues || [],
+          evidence: judgement.evidence || [],
+          summary: judgement.summary || '',
+        };
+
+        metrics.validations.push(validationRecord);
+        metrics.transcript.push({
+          turn: executionTurnCount,
+          type: 'llm_judge',
+          userMessage: validationRecord.userMessage,
+          botResponse: validationRecord.botResponse,
+          judgement: validationRecord,
+        });
+
+        console.log(`⚖️  Judge score: ${judgement.score} | passed=${judgement.passed} | ${judgement.summary}`);
+
+        if (isError) testFailed = true;
+      } else if (
+        functionCall.name === 'save_spec_file' &&
+        isDiscoveryMode
+      ) {
+        toolOutput =
+          'Discovery mode is active. Spec generation is intentionally skipped.';
+
+        console.log(`🚫 ${toolOutput}`);
+      } else if (functionCall.name === 'save_spec_file') {
+        const requestedName = functionCall.args.filename || `${baseName}.spec.js`;
+        const safeName = path.basename(requestedName).endsWith('.spec.js')
+          ? path.basename(requestedName)
+          : `${baseName}.spec.js`;
+
+        const targetSpecPath = path.join(specsDir, safeName);
+        fs.writeFileSync(targetSpecPath, cleanGeneratedCode(functionCall.args.codeContent), 'utf-8');
+
+        metrics.savedSpecPath = targetSpecPath;
+        toolOutput = `Spec file written to ${targetSpecPath}`;
+        console.log(`💾 ${toolOutput}`);
+      } else {
+        const mcpToolTimeoutMs = Number(
+          process.env.MCP_TOOL_TIMEOUT_MS || 60000
+        );
+
+        console.log(
+          `⏱️ MCP timeout for ${functionCall.name}: ` +
+          `${mcpToolTimeoutMs}ms`
+        );
+
+        const mcpResult = await mcpClient.callTool(
+          {
+            name: functionCall.name,
+            arguments: functionCall.args || {},
+          },
+          undefined,
+          {
+            timeout: mcpToolTimeoutMs,
+          }
+        );
+
+        toolOutput = getToolText(mcpResult);
+        isError = Boolean(mcpResult.isError);
+
+        console.log(toolOutput.slice(0, 2500));
+
+        attachScreenshots(metrics, toolOutput);
+
+        if (functionCall.name === 'pw_compare_visual') {
+          const visualResult = parseToolJson(toolOutput);
+          if (visualResult) {
+            metrics.visualComparisons.push(visualResult);
+          }
+        }
+
+        if (functionCall.name === 'pw_send_olive_message') {
+          const parsed = parseToolJson(toolOutput);
+          if (parsed) {
+            metrics.transcript.push({
+              turn: executionTurnCount,
+              type: 'olive_message',
+              userMessage: parsed.userMessage,
+              botResponse: parsed.botResponse,
+              botResponseLength: parsed.botResponse ? parsed.botResponse.length : 0,
+              fullConversationLength: parsed.fullConversation ? parsed.fullConversation.length : 0,
+            });
+          }
+        }
+
+        if (isError) {
+          testFailed = true;
+        }
+      }
+
+      stepRecord.status = isError ? 'FAILED' : 'SUCCESS';
+      stepRecord.durationMs = Date.now() - stepStart;
+      stepRecord.outputPreview = preview(toolOutput);
+      metrics.steps.push(stepRecord);
+
+      consecutiveErrors = isError ? consecutiveErrors + 1 : 0;
+
+      if (consecutiveErrors >= 3) {
+        testFailed = true;
+        toolOutput += '\nStopped after 3 consecutive tool failures.';
+        console.error('❌ Stopped after 3 consecutive tool failures.');
+        break;
+      }
+
+      const maxToolOutputChars = Number(
+        readEnv('MAX_TOOL_OUTPUT_CHARS', '3500')
+      );
+
+      if (
+        typeof toolOutput === 'string' &&
+        toolOutput.length > maxToolOutputChars
+      ) {
+        toolOutput =
+          toolOutput.slice(
+            0,
+            maxToolOutputChars
+          ) +
+          '\n[Tool output truncated by framework]';
+      }
+
+      response = await chat.sendMessage({
+        message: [
+          {
+            functionResponse: {
+              name: functionCall.name,
+              response: {
+                result: toolOutput,
+                failed: isError,
+              },
+            },
+          },
+        ],
+      });
+
+      recordUsage(metrics, response, `After ${functionCall.name}`);
+    }
+  } finally {
+    if (
+      !isDiscoveryMode &&
+      metrics.savedSpecPath &&
+      readEnv('AUTO_RUN_GENERATED_SPEC', 'false').toLowerCase() === 'true'
+    ) {
+      console.log(`\n▶️  AUTO_RUN_GENERATED_SPEC=true, executing generated spec: ${metrics.savedSpecPath}`);
+
+      const playwrightArgs = ['playwright', 'test', metrics.savedSpecPath, '--project=chromium'];
+
+      if (process.env.HEADLESS === 'false') {
+        playwrightArgs.push('--headed');
+      }
+
+      const specStart = Date.now();
+      const result = spawnSync('npx', playwrightArgs, {
+        cwd: __dirname,
+        stdio: 'inherit',
+        env: process.env,
+      });
+
+      metrics.steps.push({
+        turn: metrics.steps.length + 1,
+        name: 'execute_generated_playwright_spec',
+        status: result.status === 0 ? 'SUCCESS' : 'FAILED',
+        durationMs: Date.now() - specStart,
+        argsPreview: playwrightArgs.join(' '),
+        outputPreview: `Exit status: ${result.status}`,
+      });
+
+      if (result.status !== 0) {
+        testFailed = true;
+      }
+    }
+
+    metrics.endedAt = new Date().toISOString();
+    metrics.durationMs = Date.now() - runStartMs;
+
+    const transcriptPath = path.join(transcriptDir, `${baseName}.transcript.json`);
+    const metricsJsonPath = path.join(reportsDir, `${baseName}.metrics.json`);
+
+    metrics.transcriptJsonPath = transcriptPath;
+    metrics.metricsJsonPath = metricsJsonPath;
+
+    writeJson(transcriptPath, metrics.transcript);
+    writeJson(metricsJsonPath, metrics);
+
+    try {
+      const compiledHtml = generateHtmlReport({
+        scenarioName: baseName,
+        metrics,
+      });
+
+      fs.writeFileSync(path.join(reportsDir, `${baseName}.report.html`), compiledHtml, 'utf-8');
+
+      console.log(`📊 HTML report saved: reports/${baseName}.report.html`);
+      console.log(`📄 Metrics JSON saved: reports/${baseName}.metrics.json`);
+      console.log(`🧾 Transcript JSON saved: reports/transcripts/${baseName}.transcript.json`);
+    } catch (reportError) {
+      console.error(`⚠️ Failed to generate report: ${reportError.message}`);
+    }
+
+    const successfulDiscoverySteps = metrics.steps.filter((step) => {
+      const status = String(step.status || '').toUpperCase();
+
+      return [
+        'SUCCESS',
+        'PASSED',
+        'COMPLETED',
+      ].includes(status);
+    }).length;
+
+    const minimumSuccessfulSteps = Number(
+      readEnv('MIN_DISCOVERY_SUCCESSFUL_STEPS', '3')
+    );
+
+    const minimumScreenshots = Number(
+      readEnv('MIN_DISCOVERY_SCREENSHOTS', '1')
+    );
+
+    /*
+     * Discovery success represents framework execution and evidence
+     * collection. It must not depend on whether Olive passed the
+     * semantic LLM judge.
+     *
+     * Generative scenarios may produce transcript, metrics and judge
+     * evidence without requiring screenshots. Deterministic and visual
+     * scenarios continue to require the configured screenshot minimum.
+     */
+    const isGenerativeScenario =
+      /^TEST_TYPE:\s*Generative/im.test(targetScenario) ||
+      /^TYPE:\s*Generative/im.test(targetScenario) ||
+      /@generative\b/i.test(targetScenario);
+
+    const hasTranscriptEvidence =
+      Array.isArray(metrics.conversationTurns) &&
+      metrics.conversationTurns.length > 0;
+
+    const hasJudgeEvidence =
+      Array.isArray(metrics.judgements) &&
+      metrics.judgements.length > 0;
+
+    const hasGenerativeEvidence =
+      hasTranscriptEvidence ||
+      hasJudgeEvidence ||
+      metrics.steps.some((step) =>
+        [
+          'pw_send_olive_message',
+          'verify_generative_response',
+        ].includes(String(step.tool || step.name || ''))
+      );
+
+    const hasRequiredEvidence = isGenerativeScenario
+      ? hasGenerativeEvidence
+      : metrics.screenshots.length >= minimumScreenshots;
+
+    const discoverySucceeded =
+      successfulDiscoverySteps >= minimumSuccessfulSteps &&
+      hasRequiredEvidence;
+
+    /*
+     * In discovery mode, application assertion failures are evidence,
+     * not framework failures. Outside discovery mode, normal test
+     * pass/fail behaviour remains unchanged.
+     */
+    const finalFailed = isDiscoveryMode
+      ? !discoverySucceeded
+      : testFailed;
+
+    if (isDiscoveryMode) {
+      console.log('');
+      console.log('🔎 Discovery completion summary');
+      console.log(
+        `• Successful runtime steps: ${successfulDiscoverySteps}`
+      );
+      console.log(
+        `• Captured screenshots: ${metrics.screenshots.length}`
+      );
+      console.log(
+        `• Generated spec: ${metrics.savedSpecPath ? 'unexpected' : 'none'}`
+      );
+      console.log(
+        `• Framework discovery: ${
+          discoverySucceeded ? 'PASSED' : 'FAILED'
+        }`
+      );
+      console.log(
+        `• Application assertions: ${
+          testFailed ? 'FAILED' : 'PASSED'
+        }`
+      );
+
+      if (testFailed && discoverySucceeded) {
+        console.log(
+          '⚠️ Application or LLM-judge assertions failed, but the ' +
+          'framework completed discovery and collected sufficient evidence.'
+        );
+      }
+    }
+
+    try {
+      if (
+        mcpClient &&
+        typeof mcpClient.close === 'function'
+      ) {
+        await mcpClient.close();
+        console.log('🧹 MCP client closed.');
+      }
+    } catch (closeError) {
+      console.warn(
+        `⚠️ Failed to close MCP client cleanly: ${closeError.message}`
+      );
+    }
+
+    console.log(
+      finalFailed
+        ? '❌ Agent process concluded with failures.'
+        : isDiscoveryMode
+          ? '✅ Discovery completed successfully.'
+          : '✅ Agent process concluded.'
+    );
+
+    process.exit(finalFailed ? 1 : 0);
+  }
+}
+
+const explicitTargetInstruction = `
+${targetScenario}
+
+EXECUTION CONTEXT:
+- Platform: ${isWeb ? 'Web' : 'Mobile'}
+- Target infrastructure: ${executionTarget.toUpperCase()}
+${isWeb ? `- Target URL: ${targetUrl}\n- Use this exact Target URL even if the scenario text contains another URL.` : ''}
+${isBrowserStack ? `
+- BrowserStack mode is enabled. Generated code must read credentials from BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY only.
+- Mobile app hash must be read from BROWSERSTACK_APP_HASH, APP_UAT, or APP_PROD.
+` : `
+- Local mode is enabled. Use local browser/Appium settings unless the scenario explicitly states BrowserStack.
+`}
+`;
+
+executeGenerativeFlow(explicitTargetInstruction).catch(error => {
+  console.error(`❌ Agent fatal error: ${error.stack || error.message}`);
+  process.exit(1);
+});
