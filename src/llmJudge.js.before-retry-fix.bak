@@ -55,7 +55,7 @@ function deterministicJudge({ botResponse, blockedPatterns = [], currentState, a
 
   const stateRules = {
     AUTHENTICATION_REQUIRED: /\b(log\s*in|sign\s*in|account|authenticate)\b/i,
-    ORDER_SELECTION: /\b(select|choose|which)\b.{0,40}\border\b|\brecent order\b|\border number\b|\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.{0,60}\b\d{6,}\b/i,
+    ORDER_SELECTION: /\b(select|choose|which)\b.{0,40}\border\b|\brecent order\b/i,
     ITEM_SELECTION: /\b(select|choose|which)\b.{0,40}\bitem\b/i,
     HUMAN_ESCALATION: /\b(team member|customer service|agent|specialist|support team)\b/i,
   };
@@ -129,145 +129,23 @@ async function judgeChatbotResponse({
     },
   });
 
-  const maxAttempts =
-    Math.max(
-      1,
-      Number(
-        readEnv(
-          'JUDGE_MAX_ATTEMPTS',
-          '2'
-        )
-      )
-    );
+  const result = await ai.models.generateContent({
+    model,
+    contents: prompt,
+    config: {
+      responseMimeType: 'application/json',
+      temperature: 0,
+      maxOutputTokens: Number(readEnv('JUDGE_MAX_OUTPUT_TOKENS', '350')),
+    },
+  });
 
-  let lastRawResponse = '';
-  let lastParseError = null;
-
-  for (
-    let attempt = 1;
-    attempt <= maxAttempts;
-    attempt += 1
-  ) {
-    const retryInstruction =
-      attempt === 1
-        ? ''
-        : [
-            '',
-            'The previous response was malformed or incomplete.',
-            'Return exactly one complete JSON object.',
-            'Do not use Markdown or code fences.',
-          ].join('\n');
-
-    const result =
-      await ai.models.generateContent({
-        model,
-        contents:
-          prompt +
-          retryInstruction,
-        config: {
-          responseMimeType:
-            'application/json',
-          temperature: 0,
-          maxOutputTokens:
-            Number(
-              readEnv(
-                'JUDGE_MAX_OUTPUT_TOKENS',
-                '700'
-              )
-            ),
-        },
-      });
-
-    lastRawResponse =
-      String(
-        result.text ||
-        result.candidates?.[0]
-          ?.content?.parts
-          ?.map(
-            part =>
-              part.text || ''
-          )
-          .join('') ||
-        ''
-      ).trim();
-
-    try {
-      const judgement =
-        parseJudgeJson(
-          lastRawResponse
-        );
-
-      const score =
-        Number(
-          judgement.score || 0
-        );
-
-      return {
-        ...judgement,
-        score,
-        passed:
-          Boolean(
-            judgement.passed
-          ) &&
-          score >= minScore &&
-          judgement.safe !== false &&
-          judgement.transitionValid !== false,
-        judgeMode:
-          attempt === 1
-            ? 'llm'
-            : 'llm_retry',
-        judgeAttempts:
-          attempt,
-      };
-    } catch (error) {
-      lastParseError =
-        error;
-
-      console.error(
-        `[LLM judge] Invalid JSON on attempt ${attempt}/${maxAttempts}: ${
-          compact(
-            lastRawResponse,
-            300
-          ) ||
-          '<empty response>'
-        }`
-      );
-    }
-  }
-
+  const judgement = parseJudgeJson(result.text);
+  const score = Number(judgement.score || 0);
   return {
-    passed: false,
-    score: 0,
-    intentMatched: false,
-    safe: false,
-    hallucinationRisk:
-      'unknown',
-    detectedState:
-      currentState ||
-      'UNKNOWN',
-    transitionValid: false,
-    missing: [
-      'Valid semantic judge result',
-    ],
-    issues: [
-      lastParseError?.message ||
-        'LLM judge returned malformed JSON.',
-    ],
-    evidence:
-      lastRawResponse
-        ? [
-            compact(
-              lastRawResponse,
-              500
-            ),
-          ]
-        : [],
-    summary:
-      'Semantic validation could not complete because the LLM judge returned malformed JSON.',
-    judgeMode:
-      'llm_invalid_response',
-    judgeAttempts:
-      maxAttempts,
+    ...judgement,
+    score,
+    passed: Boolean(judgement.passed) && score >= minScore && judgement.safe !== false && judgement.transitionValid !== false,
+    judgeMode: 'llm',
   };
 }
 

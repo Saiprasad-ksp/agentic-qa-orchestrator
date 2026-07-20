@@ -1590,14 +1590,12 @@ ${exploration.screenshots.join('\n')}
             .trim();
 
         let clickedInOlive = false;
-        let oliveClickResult = null;
 
         if (olive) {
           try {
-            oliveClickResult =
-              await olive.clickControl(
-                targetText
-              );
+            await olive.clickControl(
+              targetText
+            );
 
             clickedInOlive = true;
           } catch (error) {
@@ -1657,64 +1655,17 @@ ${exploration.screenshots.join('\n')}
           );
         }
 
-        const clickResult =
-          clickedInOlive
-            ? {
-                clicked: true,
-                targetText,
-                location: 'olive',
-                newBotMessages:
-                  Array.isArray(
-                    oliveClickResult
-                      ?.newBotMessages
-                  )
-                    ? oliveClickResult
-                        .newBotMessages
-                        .map(message =>
-                          String(message || '')
-                            .replace(
-                              /^text:\s*/i,
-                              ''
-                            )
-                            .trim()
-                        )
-                        .filter(Boolean)
-                    : [],
-                botResponse:
-                  String(
-                    oliveClickResult
-                      ?.botResponse ||
-                    ''
-                  )
-                    .replace(
-                      /^text:\s*/i,
-                      ''
-                    )
-                    .trim(),
-                conversationState:
-                  oliveClickResult
-                    ?.conversationState ||
-                  'UNKNOWN',
-                newBotMessageCount:
-                  Number(
-                    oliveClickResult
-                      ?.newBotMessageCount ||
-                    0
-                  ),
-              }
-            : {
-                clicked: true,
-                targetText,
-                location: 'page',
-              };
-
         return {
           content: [{
             type: 'text',
-            text:
-              JSON.stringify(
-                clickResult
-              ),
+            text: JSON.stringify({
+              clicked: true,
+              targetText,
+              location:
+                clickedInOlive
+                  ? 'olive'
+                  : 'page',
+            }),
           }],
         };
       }

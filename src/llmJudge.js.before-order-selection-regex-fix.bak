@@ -55,7 +55,7 @@ function deterministicJudge({ botResponse, blockedPatterns = [], currentState, a
 
   const stateRules = {
     AUTHENTICATION_REQUIRED: /\b(log\s*in|sign\s*in|account|authenticate)\b/i,
-    ORDER_SELECTION: /\b(select|choose|which)\b.{0,40}\border\b|\brecent order\b|\border number\b|\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.{0,60}\b\d{6,}\b/i,
+    ORDER_SELECTION: /\b(select|choose|which)\b.{0,40}\border\b|\brecent order\b/i,
     ITEM_SELECTION: /\b(select|choose|which)\b.{0,40}\bitem\b/i,
     HUMAN_ESCALATION: /\b(team member|customer service|agent|specialist|support team)\b/i,
   };

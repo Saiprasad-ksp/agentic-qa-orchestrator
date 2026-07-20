@@ -370,7 +370,7 @@ jobs:
             fi
           fi
 
-          if [[ "$BROWSERSTACK_TARGET_TYPE" == "mobile-web" ||                 "$BROWSERSTACK_TARGET_TYPE" == "native-app" ]]; then
+          if [[ "$BROWSERSTACK_TARGET_TYPE" == "mobile-web" || "$BROWSERSTACK_TARGET_TYPE" == "native-app" ]]; then
             if [[ -z "$BROWSERSTACK_DEVICE" ]]; then
               echo "::error::BrowserStack device is required for mobile execution."
               exit 1
@@ -392,12 +392,12 @@ jobs:
           fi
 
           if [[ "$BROWSERSTACK_TARGET_TYPE" == "mobile-web" ]]; then
-            if [[ "$MOBILE_PLATFORM" == "android" &&                   "$BROWSERSTACK_MOBILE_BROWSER" != "chrome" ]]; then
+            if [[ "$MOBILE_PLATFORM" == "android" && "$BROWSERSTACK_MOBILE_BROWSER" != "chrome" ]]; then
               echo "::error::Android mobile-web execution must use Chrome."
               exit 1
             fi
 
-            if [[ "$MOBILE_PLATFORM" == "ios" &&                   "$BROWSERSTACK_MOBILE_BROWSER" != "safari" ]]; then
+            if [[ "$MOBILE_PLATFORM" == "ios" && "$BROWSERSTACK_MOBILE_BROWSER" != "safari" ]]; then
               echo "::error::iOS mobile-web execution must use Safari."
               exit 1
             fi

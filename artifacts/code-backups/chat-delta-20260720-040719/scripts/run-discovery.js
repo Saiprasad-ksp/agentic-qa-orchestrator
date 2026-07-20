@@ -213,30 +213,9 @@ function main() {
       /^AUTH_FLOW:\s*(.+?)\s*$/im
     )?.[1]?.trim().toLowerCase() || '';
 
-  const executionMode =
-    scenarioText.match(
-      /^EXECUTION_MODE:\s*(.+?)\s*$/im
-    )?.[1]?.trim().toUpperCase() || 'AGENTIC';
-
-  const authenticateInsideMcpBrowser =
-    authRequired &&
-    authFlow === 'deterministic' &&
-    executionMode === 'CHAT_DELTA';
-
-  if (authenticateInsideMcpBrowser) {
-    process.env.MCP_DETERMINISTIC_AUTH = 'true';
-    delete process.env.PLAYWRIGHT_STORAGE_STATE;
-
-    console.log('');
-    console.log(
-      '🔐 CHAT_DELTA will authenticate inside the execution browser.'
-    );
-  }
-
   if (
     authRequired &&
-    authFlow === 'deterministic' &&
-    !authenticateInsideMcpBrowser
+    authFlow === 'deterministic'
   ) {
     const authScriptPath = path.join(
       projectRoot,

@@ -356,36 +356,6 @@ async function callMcpDirect(
     );
   }
 
-  const authenticatedNavigation =
-    name === 'pw_navigate' &&
-    String(
-      process.env.MCP_DETERMINISTIC_AUTH || ''
-    ).toLowerCase() === 'true';
-
-  const oliveLongRunningTool =
-    name === 'pw_send_olive_message' ||
-    name === 'pw_click_button';
-
-  const timeoutMs =
-    authenticatedNavigation
-      ? Number(
-          process.env.MCP_AUTH_TOOL_TIMEOUT_MS ||
-          180000
-        )
-      : oliveLongRunningTool
-        ? Number(
-            process.env.MCP_OLIVE_TOOL_TIMEOUT_MS ||
-            120000
-          )
-        : Number(
-            process.env.MCP_TOOL_TIMEOUT_MS ||
-            60000
-          );
-
-  console.log(
-    `⏱️ MCP timeout for ${name}: ${timeoutMs}ms`
-  );
-
   const result =
     await mcpClient.callTool(
       {
@@ -394,7 +364,10 @@ async function callMcpDirect(
       },
       undefined,
       {
-        timeout: timeoutMs,
+        timeout: Number(
+          process.env.MCP_TOOL_TIMEOUT_MS ||
+          60000
+        ),
       }
     );
 
@@ -646,145 +619,6 @@ async function finaliseChatDeltaRun({
   );
 }
 
-
-function normaliseControlLabel(value) {
-  return String(value || '')
-    .replace(/^text:\s*/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function resolveRuntimeControlText(
-  requestedValue,
-  latest
-) {
-  const requested =
-    normaliseControlLabel(
-      requestedValue
-    );
-
-  if (!requested) {
-    return '';
-  }
-
-  /*
-   * Named runtime placeholders are intentionally resolved inside
-   * Playwright, where the real customer value remains private.
-   */
-  if (
-    /\[(?:PRIMARY|SECONDARY)_RUNTIME_ORDER_NUMBER\]/i.test(
-      requested
-    )
-  ) {
-    return requested;
-  }
-
-  const candidates = [];
-
-  if (
-    Array.isArray(
-      latest?.newBotMessages
-    )
-  ) {
-    candidates.push(
-      ...latest.newBotMessages
-    );
-  }
-
-  if (latest?.botResponse) {
-    candidates.push(
-      ...String(
-        latest.botResponse
-      ).split('\n')
-    );
-  }
-
-  const uniqueCandidates =
-    [...new Set(
-      candidates
-        .map(normaliseControlLabel)
-        .filter(Boolean)
-    )];
-
-  /*
-   * First try exact local text. This supports controls that do
-   * not contain customer-specific identifiers.
-   */
-  const exact =
-    uniqueCandidates.find(
-      candidate =>
-        candidate === requested
-    );
-
-  if (exact) {
-    return exact;
-  }
-
-  /*
-   * The planner receives redacted values. Compare each real
-   * runtime candidate after applying the same redaction.
-   */
-  const redactedMatch =
-    uniqueCandidates.find(
-      candidate =>
-        normaliseControlLabel(
-          redactChatStateForPlanner(
-            candidate
-          )
-        ) === requested
-    );
-
-  if (redactedMatch) {
-    console.log(
-      '🔐 Resolved redacted planner control to its runtime-only UI value.'
-    );
-
-    return redactedMatch;
-  }
-
-  /*
-   * Defensive fallback for planner formatting differences around
-   * the [REDACTED_ID] token.
-   */
-  if (
-    requested.includes(
-      '[REDACTED_ID]'
-    )
-  ) {
-    const [
-      prefix,
-      suffix = '',
-    ] =
-      requested.split(
-        '[REDACTED_ID]'
-      );
-
-    const partialMatch =
-      uniqueCandidates.find(
-        candidate =>
-          candidate.startsWith(
-            prefix.trim()
-          ) &&
-          (
-            !suffix.trim() ||
-            candidate.endsWith(
-              suffix.trim()
-            )
-          )
-      );
-
-    if (partialMatch) {
-      console.log(
-        '🔐 Resolved redacted planner control using local prefix/suffix matching.'
-      );
-
-      return partialMatch;
-    }
-  }
-
-  return requested;
-}
-
 async function executeChatDeltaFlow({
   scenarioText,
   mcpClient,
@@ -894,21 +728,6 @@ async function executeChatDeltaFlow({
         decision.action ===
         'CLICK_CONTROL'
       ) {
-        const runtimeControlText =
-          resolveRuntimeControlText(
-            decision.value,
-            latest
-          );
-
-        if (!runtimeControlText) {
-          testFailed = true;
-
-          failureReason =
-            'CLICK_CONTROL did not resolve to a visible runtime control.';
-
-          break;
-        }
-
         runtimeTurn += 1;
 
         result =
@@ -918,15 +737,25 @@ async function executeChatDeltaFlow({
             'pw_click_button',
             {
               targetText:
-                runtimeControlText,
+                String(
+                  decision.value || ''
+                ).trim(),
             },
             runtimeTurn
           );
 
-        /*
-         * pw_click_button returns the Olive response delta.
-         * Do not read the complete transcript after the click.
-         */
+        if (!result.failed) {
+          runtimeTurn += 1;
+
+          result =
+            await callMcpDirect(
+              mcpClient,
+              metrics,
+              'pw_read_olive_conversation',
+              {},
+              runtimeTurn
+            );
+        }
       } else if (
         decision.action ===
         'TAKE_SCREENSHOT'
@@ -964,12 +793,9 @@ async function executeChatDeltaFlow({
         testFailed = true;
 
         failureReason =
-          decision.action ===
-          'CLICK_CONTROL'
-            ? 'CLICK_CONTROL failed for the selected runtime control.'
-            : `${decision.action} failed: ${
-                decision.value || ''
-              }`.trim();
+          `${decision.action} failed: ${
+            decision.value || ''
+          }`.trim();
 
         break;
       }
@@ -1049,11 +875,7 @@ async function executeChatDeltaFlow({
             ],
             currentState:
               conversationState,
-            allowedNextStates:
-              conversationState &&
-              conversationState !== 'UNKNOWN'
-                ? [conversationState]
-                : [],
+            allowedNextStates: [],
             flowId: baseName,
             flowContext: null,
           });

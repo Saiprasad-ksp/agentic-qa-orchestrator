@@ -173,24 +173,10 @@ function main() {
   }
 
   // DISCOVERY_DETERMINISTIC_AUTH
-  const normalizedScenarioArgument = String(
-    scenarioArgument
-  ).replace(/^scenarios[\\/]/i, '');
-
-  const directScenarioPath = path.resolve(
+  const absoluteScenarioPath = path.resolve(
     projectRoot,
     scenarioArgument
   );
-
-  const absoluteScenarioPath = fs.existsSync(
-    directScenarioPath
-  )
-    ? directScenarioPath
-    : path.resolve(
-        projectRoot,
-        'scenarios',
-        normalizedScenarioArgument
-      );
 
   if (!fs.existsSync(absoluteScenarioPath)) {
     throw new Error(
@@ -213,30 +199,9 @@ function main() {
       /^AUTH_FLOW:\s*(.+?)\s*$/im
     )?.[1]?.trim().toLowerCase() || '';
 
-  const executionMode =
-    scenarioText.match(
-      /^EXECUTION_MODE:\s*(.+?)\s*$/im
-    )?.[1]?.trim().toUpperCase() || 'AGENTIC';
-
-  const authenticateInsideMcpBrowser =
-    authRequired &&
-    authFlow === 'deterministic' &&
-    executionMode === 'CHAT_DELTA';
-
-  if (authenticateInsideMcpBrowser) {
-    process.env.MCP_DETERMINISTIC_AUTH = 'true';
-    delete process.env.PLAYWRIGHT_STORAGE_STATE;
-
-    console.log('');
-    console.log(
-      '🔐 CHAT_DELTA will authenticate inside the execution browser.'
-    );
-  }
-
   if (
     authRequired &&
-    authFlow === 'deterministic' &&
-    !authenticateInsideMcpBrowser
+    authFlow === 'deterministic'
   ) {
     const authScriptPath = path.join(
       projectRoot,
@@ -257,7 +222,7 @@ function main() {
       process.execPath,
       [
         authScriptPath,
-        absoluteScenarioPath,
+        scenarioArgument,
       ],
       {
         cwd: projectRoot,
@@ -337,14 +302,14 @@ function main() {
 
   ensureDir(discoveryDir);
 
-  const runtimeScenarioArgument = scenarioArgument
+  const normalizedScenarioArgument = scenarioArgument
     .replace(/\\/g, '/')
     .replace(/^\.\//, '')
     .replace(/^scenarios\//, '');
 
   const scenarioBase = path.basename(
-    runtimeScenarioArgument,
-    path.extname(runtimeScenarioArgument)
+    normalizedScenarioArgument,
+    path.extname(normalizedScenarioArgument)
   );
 
   const startedAt = new Date().toISOString();
@@ -394,7 +359,7 @@ function main() {
       '-r',
       preloadPath,
       runtimePath,
-      runtimeScenarioArgument,
+      normalizedScenarioArgument,
     ],
     {
       cwd: projectRoot,

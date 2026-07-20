@@ -113,13 +113,6 @@ function detectConversationState(text) {
   }
 
   if (
-    /(?:which order|select(?: or type)?(?: the)? order|choose(?: an?)? order|order number)/i.test(value) ||
-    /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.{0,60}\b\d{6,}\b/i.test(value)
-  ) {
-    return 'ORDER_SELECTION';
-  }
-
-  if (
     /can connect you|connect you with|talk to a team member|contact support|need more support/i.test(value)
   ) {
     return 'CAN_ESCALATE';
@@ -1109,509 +1102,6 @@ class OliveWebBot {
     return lines;
   }
 
-  async clickControl(targetText) {
-    const beforeLines =
-      await this.readChatLines();
-
-    const value =
-      String(targetText || '')
-        .replace(/^text:\s*/i, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-    if (!value) {
-      throw new Error(
-        'Olive control text is required.'
-      );
-    }
-
-    const surface =
-      this.lastSurface ||
-      await this.findChatSurface({
-        timeout: 5000,
-      });
-
-    if (!surface) {
-      throw new Error(
-        'Olive chat surface is not available.'
-      );
-    }
-
-    /*
-     * Do not build a RegExp from user-visible text because order
-     * labels can contain punctuation. Use exact accessible text
-     * first, then exact visible text.
-     */
-    /*
-     * Business placeholders are resolved entirely inside Playwright.
-     * Customer order identifiers remain local and are never sent to
-     * the planner.
-     */
-    const primaryOrderRequested =
-      /\[PRIMARY_RUNTIME_ORDER_NUMBER\]/i.test(
-        value
-      );
-
-    const secondaryOrderRequested =
-      /\[SECONDARY_RUNTIME_ORDER_NUMBER\]/i.test(
-        value
-      );
-
-    if (
-      primaryOrderRequested ||
-      secondaryOrderRequested
-    ) {
-      const orderPattern =
-        /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b[\s\S]{0,80}\b\d{6,}\b/i;
-
-      const orderCandidates = [
-        surface.getByRole('button'),
-        surface.getByRole('option'),
-        surface.getByRole('link'),
-        surface.locator(
-          'button, [role="button"], [role="option"], a'
-        ),
-      ];
-
-      const visibleOrders = [];
-      const seenLabels = new Set();
-
-      for (const group of orderCandidates) {
-        const count =
-          Math.min(
-            await group
-              .count()
-              .catch(() => 0),
-            100
-          );
-
-        for (
-          let index = 0;
-          index < count;
-          index += 1
-        ) {
-          const candidate =
-            group.nth(index);
-
-          const visible =
-            await candidate
-              .isVisible({
-                timeout: 250,
-              })
-              .catch(() => false);
-
-          if (!visible) {
-            continue;
-          }
-
-          const label =
-            String(
-              await candidate
-                .innerText()
-                .catch(() => '') ||
-              await candidate
-                .getAttribute('aria-label')
-                .catch(() => '') ||
-              ''
-            )
-              .replace(/\s+/g, ' ')
-              .trim();
-
-          if (
-            !label ||
-            !orderPattern.test(label) ||
-            seenLabels.has(label)
-          ) {
-            continue;
-          }
-
-          seenLabels.add(label);
-
-          visibleOrders.push({
-            candidate,
-            label,
-          });
-        }
-      }
-
-      const requestedIndex =
-        secondaryOrderRequested
-          ? 1
-          : 0;
-
-      const selected =
-        visibleOrders[requestedIndex];
-
-      if (!selected) {
-        throw new Error(
-          secondaryOrderRequested
-            ? 'A secondary visible runtime order option was not found.'
-            : 'A primary visible runtime order option was not found.'
-        );
-      }
-
-      const beforeOrderClickLines =
-        beforeLines;
-
-      await selected.candidate
-        .scrollIntoViewIfNeeded()
-        .catch(() => {});
-
-      await selected.candidate.click({
-        timeout: 10000,
-      });
-
-      console.log(
-        `[Olive] Clicked ${
-          secondaryOrderRequested
-            ? 'secondary'
-            : 'primary'
-        } runtime order option.`
-      );
-
-      const response =
-        await this.waitForResponseDelta(
-          beforeOrderClickLines,
-          ''
-        );
-
-      return {
-        clicked: true,
-        targetText:
-          secondaryOrderRequested
-            ? '[SECONDARY_RUNTIME_ORDER_NUMBER]'
-            : '[PRIMARY_RUNTIME_ORDER_NUMBER]',
-        surface:
-          surface === this.page
-            ? 'page'
-            : 'frame',
-        botResponse:
-          response.botResponse,
-        newBotMessages:
-          response.newBotMessages,
-        newBotMessageCount:
-          response.newBotMessages.length,
-        conversationState:
-          detectConversationState(
-            response.botResponse
-          ),
-      };
-    }
-
-    const candidates = [
-      surface.getByRole(
-        'button',
-        {
-          name: value,
-          exact: true,
-        }
-      ),
-      surface.getByRole(
-        'option',
-        {
-          name: value,
-          exact: true,
-        }
-      ),
-      surface.getByRole(
-        'link',
-        {
-          name: value,
-          exact: true,
-        }
-      ),
-      surface.getByText(
-        value,
-        {
-          exact: true,
-        }
-      ),
-    ];
-
-    for (const candidateGroup of candidates) {
-      const count =
-        await candidateGroup
-          .count()
-          .catch(() => 0);
-
-      for (
-        let index = 0;
-        index < count;
-        index += 1
-      ) {
-        const candidate =
-          candidateGroup.nth(index);
-
-        const isVisible =
-          await candidate
-            .isVisible({
-              timeout: 1000,
-            })
-            .catch(() => false);
-
-        if (!isVisible) {
-          continue;
-        }
-
-        await candidate
-          .scrollIntoViewIfNeeded()
-          .catch(() => {});
-
-        try {
-          await candidate.click({
-            timeout: 10000,
-          });
-
-          console.log(
-            `[Olive] Clicked control: ${value}`
-          );
-
-          const response =
-            await this.waitForResponseDelta(
-              beforeLines,
-              ''
-            );
-
-          return {
-            clicked: true,
-            targetText: value,
-            surface:
-              surface === this.page
-                ? 'page'
-                : 'frame',
-            botResponse:
-              response.botResponse,
-            newBotMessages:
-              response.newBotMessages,
-            newBotMessageCount:
-              response.newBotMessages.length,
-            conversationState:
-              detectConversationState(
-                response.botResponse
-              ),
-          };
-        } catch (_) {
-          /*
-           * Some Olive options are rendered as clickable parent
-           * containers while the matching text is on a child node.
-           */
-          const parentClickable =
-            candidate.locator(
-              'xpath=ancestor-or-self::*[' +
-              '@role="button" or ' +
-              '@role="option" or ' +
-              '@role="link" or ' +
-              'self::button or self::a' +
-              '][1]'
-            );
-
-          if (
-            await parentClickable
-              .isVisible({
-                timeout: 500,
-              })
-              .catch(() => false)
-          ) {
-            await parentClickable.click({
-              timeout: 10000,
-            });
-
-            console.log(
-              `[Olive] Clicked parent control: ${value}`
-            );
-
-            const response =
-              await this.waitForResponseDelta(
-                beforeLines,
-                ''
-              );
-
-            return {
-              clicked: true,
-              targetText: value,
-              surface:
-                surface === this.page
-                  ? 'page'
-                  : 'frame',
-              botResponse:
-                response.botResponse,
-              newBotMessages:
-                response.newBotMessages,
-              newBotMessageCount:
-                response.newBotMessages.length,
-              conversationState:
-                detectConversationState(
-                  response.botResponse
-                ),
-            };
-          }
-        }
-      }
-    }
-
-    throw new Error(
-      `Visible Olive control was not found: ${value}`
-    );
-  }
-
-  async readVisibleOrderControls() {
-    const surface =
-      this.lastSurface ||
-      await this.findChatSurface({
-        timeout: 1500,
-      });
-
-    if (!surface) {
-      return [];
-    }
-
-    const orderPattern =
-      /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b[\s\S]{0,80}\b\d{6,}\b/i;
-
-    const groups = [
-      surface.getByRole('button'),
-      surface.getByRole('option'),
-      surface.getByRole('link'),
-      surface.locator(
-        'button, [role="button"], [role="option"], a'
-      ),
-    ];
-
-    const labels = [];
-    const seen = new Set();
-
-    for (const group of groups) {
-      const count =
-        Math.min(
-          await group
-            .count()
-            .catch(() => 0),
-          100
-        );
-
-      for (
-        let index = 0;
-        index < count;
-        index += 1
-      ) {
-        const candidate =
-          group.nth(index);
-
-        const visible =
-          await candidate
-            .isVisible({
-              timeout: 100,
-            })
-            .catch(() => false);
-
-        if (!visible) {
-          continue;
-        }
-
-        const label =
-          String(
-            await candidate
-              .innerText()
-              .catch(() => '') ||
-            await candidate
-              .getAttribute(
-                'aria-label'
-              )
-              .catch(() => '') ||
-            ''
-          )
-            .replace(/^text:\s*/i, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-
-        if (
-          !label ||
-          !orderPattern.test(label) ||
-          seen.has(label)
-        ) {
-          continue;
-        }
-
-        seen.add(label);
-        labels.push(label);
-      }
-    }
-
-    return labels;
-  }
-
-  async waitForOrderControlDelta(
-    beforeControls,
-    timeoutMs
-  ) {
-    const before =
-      new Set(
-        (beforeControls || [])
-          .map(value =>
-            String(value || '')
-              .replace(/\s+/g, ' ')
-              .trim()
-          )
-          .filter(Boolean)
-      );
-
-    const deadline =
-      Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      const current =
-        await this
-          .readVisibleOrderControls()
-          .catch(() => []);
-
-      const added =
-        current.filter(
-          value =>
-            !before.has(value)
-        );
-
-      if (added.length) {
-        /*
-         * Require a short quiet period so all order options can
-         * finish rendering before returning.
-         */
-        await this.page.waitForTimeout(
-          Number(
-            process.env
-              .OLIVE_ORDER_CONTROL_QUIET_MS ||
-            1200
-          )
-        );
-
-        const finalControls =
-          await this
-            .readVisibleOrderControls()
-            .catch(() => added);
-
-        const finalAdded =
-          finalControls.filter(
-            value =>
-              !before.has(value)
-          );
-
-        return {
-          botResponse:
-            finalAdded.join('\n'),
-          newBotMessages:
-            finalAdded,
-          detectedBy:
-            'visible_order_controls',
-        };
-      }
-
-      await this.page.waitForTimeout(300);
-    }
-
-    throw new Error(
-      'Timed out waiting for visible Olive order controls.'
-    );
-  }
-
   async sendMessage(userMessage) {
     const surface =
       await this.findChatSurface({
@@ -1639,11 +1129,6 @@ class OliveWebBot {
      */
     const beforeLines =
       await this.readChatLines();
-
-    const beforeOrderControls =
-      await this
-        .readVisibleOrderControls()
-        .catch(() => []);
 
     await input.click({
       timeout: 10000,
@@ -1680,38 +1165,11 @@ class OliveWebBot {
       await input.press('Enter');
     }
 
-    const responseTimeoutMs =
-      Number(
-        process.env
-          .OLIVE_RESPONSE_TIMEOUT_MS ||
-        this.responseTimeout
-      );
-
-    const textDeltaPromise =
-      this.waitForResponseDelta(
+    const result =
+      await this.waitForResponseDelta(
         beforeLines,
         userMessage
       );
-
-    const orderControlPromise =
-      this.waitForOrderControlDelta(
-        beforeOrderControls,
-        responseTimeoutMs
-      );
-
-    let result;
-
-    try {
-      result =
-        await Promise.any([
-          textDeltaPromise,
-          orderControlPromise,
-        ]);
-    } catch (error) {
-      throw new Error(
-        `Timed out waiting for Olive response to: "${userMessage}"`
-      );
-    }
 
     let screenshotPath = null;
 
@@ -1781,18 +1239,6 @@ class OliveWebBot {
     let stableSince = 0;
     let sawBusy = false;
 
-    /*
-     * Olive often emits one response as several delayed bubbles.
-     * Do not return after only the first bubble becomes stable.
-     * Require a continuous quiet window after the latest change.
-     */
-    const responseQuietWindowMs =
-      Number(
-        process.env
-          .OLIVE_RESPONSE_QUIET_WINDOW_MS ||
-        4000
-      );
-
     while (Date.now() < deadline) {
       await this.page.waitForTimeout(450);
 
@@ -1811,8 +1257,7 @@ class OliveWebBot {
       ) {
         console.log(
           `🔎 Chatbot capture: before=${beforeLines.length}, ` +
-          `after=${afterLines.length}, busy=${busy}, ` +
-          `quietForMs=${stableSince ? Date.now() - stableSince : 0}`
+          `after=${afterLines.length}, busy=${busy}`
         );
       }
 
@@ -1884,15 +1329,10 @@ class OliveWebBot {
           : 0;
       }
 
-      const quietForMs =
-        stableSince
-          ? Date.now() - stableSince
-          : 0;
-
       const stable =
         Boolean(stableSince) &&
-        quietForMs >=
-          responseQuietWindowMs;
+        Date.now() - stableSince >=
+          RESPONSE_STABLE_MS;
 
       /*
        * Prefer completion after Olive has visibly
@@ -1904,8 +1344,11 @@ class OliveWebBot {
         signature.length >= 12 &&
         stable &&
         !busy &&
-        quietForMs >=
-          responseQuietWindowMs
+        (
+          sawBusy ||
+          Date.now() - stableSince >=
+            RESPONSE_STABLE_MS
+        )
       ) {
         return {
           botResponse:

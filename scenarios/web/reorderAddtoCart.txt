@@ -1,45 +1,230 @@
-TITLE: Olive Agent Handover and End-to-End Chat Validation
+TITLE: Olive Reorder, Add-to-Cart and Agent Messaging Validation
 
 PLATFORM: Web
+EXECUTION_MODE: CHAT_DELTA
+
 AUTH_REQUIRED: true
 AUTH_FLOW: Deterministic
 
-TARGET_PATH: /olive-chatbot/auth-flow/reorder
-
+TARGET_PATH: /
 TEST_TYPE: Generative
 
-BRAND: Woolworths
+ALLOW_PRODUCTION: false
 
+BRAND: Woolworths
 BOT_NAME: Olive Bot
 
-TAGS: @woolworths, @web
+TAGS: @woolworths @web @loggedin @reorder @add-to-cart @agent-handover @transactional @regression
 
 GOAL:
-Verify the Olive chat agent handover and ensure that the bot can handle various user interactions correctly.
+Validate the authenticated Olive reorder journey using recent-order data discovered dynamically from the application. Validate order selection, typed order entry, Add to cart, cancelled-order confirmation branches, returning to general help, agent handover and LivePerson agent messaging without hardcoded order identifiers, dates, counts or exact bot wording.
 
-CONVERSATION_STRATEGY:
-1. Open the Olive chatbot web in auth flow as "reorder".
-2. Reload the chat widget to create a new session.
-3. Dismiss any popup window or screen left from previous chats.
-4. Type "Reorder" in the chatbot and validate the response.
-5. Click on an order from the recent orders list and validate the response.
-6. Click on the "Add to cart" button and validate the response.
-7. Type "Reorder cancelled order" and validate the response.
-8. Confirm or deny the reorder request and validate the subsequent responses.
-9. Continue interacting with the chatbot as needed.
+PRECONDITIONS:
+- Deterministic Woolworths login must run before scenario discovery.
+- The authenticated browser context must reuse PLAYWRIGHT_STORAGE_STATE.
+- Login credentials must only be loaded from the protected local credentials file.
+- The authenticated test account must have sufficient recent-order data for the required branches.
+- A LivePerson test-agent session must be available when the agent-handover branch is executed.
+- No credential, token, order identifier or customer information may be passed to Gemini or Ollama.
+- This scenario must not run against production.
 
-EXPECTATIONS:
-- The bot should respond appropriately to user inputs related to reordering.
-- The bot should handle agent handovers seamlessly.
-- The bot should provide accurate information about recent orders and allow users to add items to their cart.
+TEST_DATA_STRATEGY:
+- Discover recent orders from the chatbot at runtime.
+- Do not use fixed order identifiers, dates, order descriptions or order counts.
+- Capture the visible identifier of the first eligible recent order as the primary runtime order.
+- Capture a different eligible recent order as the secondary runtime order when available.
+- When an order must be entered manually, type an identifier captured from the current UI during the same run.
+- For the cancelled-order branch, use an order dynamically surfaced by Olive or an order discovered at runtime that produces the cancelled-order confirmation state.
+- Store runtime-discovered values only in execution memory and test evidence.
+- Do not write discovered customer order data back into the scenario file or generated source code.
+- Mask or redact customer-specific values in the shareable report where required.
+- Fail with a clear test-data error when the authenticated account cannot provide data required for a mandatory branch.
 
-ALLOWED_INTERMEDIATE_STATES:
-- Chatbot is in the initial state after opening.
-- Chatbot is displaying a list of recent orders.
-- User has selected an order from the list.
-- User has clicked on the "Add to cart" button.
-- User has confirmed or denied a reorder request.
+RESPONSE_VALIDATION_STRATEGY:
+- Validate chatbot responses semantically.
+- Do not require exact full-text equality.
+- Ignore harmless changes in punctuation, whitespace, line wrapping and sentence order.
+- Validate that the response matches the expected intent and business outcome.
+- Reject unrelated responses, application errors, unsupported guarantees and contradictory instructions.
+- Wait until the chatbot response has completed before continuing.
 
-MAX_CUSTOMER_TURNS: 10
+EXECUTION_FLOW:
 
-MIN_MEANINGFUL_RESPONSES: 5
+1. Open the configured environment base URL using TARGET_PATH.
+
+2. Confirm the authenticated session is active.
+
+3. Open the Olive chatbot.
+
+4. Reload or reset the chat widget to create a clean conversation.
+
+5. Dismiss any popup, modal, previous-chat screen, ended-conversation screen or blocking overlay.
+
+6. Send:
+   Reorder
+
+7. Validate that Olive:
+   - recognises the reorder intent;
+   - explains that items from a recent order can be added to a cart;
+   - asks the customer to select or enter an order;
+   - presents available recent-order choices.
+
+8. Discover all currently visible recent-order choices.
+
+9. Confirm that at least one eligible recent order is available.
+
+10. Capture the first eligible recent-order reference as the primary runtime order.
+
+11. Select the primary runtime order using its visible order control.
+
+12. Validate that Olive:
+    - acknowledges the selected order;
+    - explains the add-to-cart action;
+    - presents an Add to cart control;
+    - explains that items may be reviewed or edited in the cart;
+    - provides any relevant stock, pricing or specials qualification.
+
+13. Click the visible Add to cart control.
+
+14. Validate that Olive confirms the action completed successfully.
+
+15. Capture screenshot evidence after the primary-order branch.
+
+16. Send:
+    Reorder cancelled order
+
+17. Validate that Olive either:
+    - asks the customer to select or enter an order; or
+    - presents a confirmation for a dynamically identified cancelled order.
+
+18. When Olive asks for an order:
+    - discover an eligible recent-order reference from the current UI;
+    - prefer a different order from the primary runtime order;
+    - type or select the runtime-discovered order;
+    - never use an order value stored in the scenario.
+
+19. Validate the resulting reorder response.
+
+20. When Add to cart is presented:
+    - click Add to cart;
+    - validate successful completion.
+
+21. Capture screenshot evidence after the dynamically entered-order branch.
+
+22. Start the cancelled-order journey again.
+
+23. Continue using available runtime-discovered order data until Olive displays a cancelled-order confirmation state.
+
+24. Validate that the confirmation:
+    - identifies an order dynamically;
+    - asks the customer to confirm the reorder;
+    - presents affirmative and negative response controls.
+
+25. Capture the dynamically displayed cancelled-order reference for evidence without writing it into source code.
+
+26. Select the negative response control.
+
+27. Validate that Olive returns to order selection or asks the customer for another order.
+
+28. Choose an eligible runtime-discovered recent order.
+
+29. Continue through the Add to cart journey.
+
+30. Validate successful completion.
+
+31. Capture screenshot evidence after the negative-confirmation branch.
+
+32. Start the cancelled-order journey again.
+
+33. Use runtime-discovered data to reach the cancelled-order confirmation state.
+
+34. Select the affirmative response control.
+
+35. Validate that Olive:
+    - accepts the confirmation;
+    - continues the reorder journey;
+    - presents Add to cart when the order is eligible;
+    - explains any relevant cart, stock, pricing or specials conditions.
+
+36. Click Add to cart.
+
+37. Validate successful completion.
+
+38. Capture screenshot evidence after the affirmative-confirmation branch.
+
+39. Start another reorder journey using runtime-discovered recent-order data.
+
+40. When the reorder options are displayed, select the visible Help with something else control.
+
+41. Validate that Olive returns to a general-help, intent-selection or assistance state.
+
+42. Capture screenshot evidence after returning to general help.
+
+AGENT_HANDOVER_FLOW:
+
+43. From the general-help state, discover a visible option that initiates human-agent support.
+
+44. Select the available human-agent support option.
+
+45. Validate that the conversation enters an agent-handover, queueing, connecting or connected state.
+
+46. Do not claim handover success solely because a handover button was clicked.
+
+47. Confirm that the LivePerson interaction exists and is assigned or available to the configured test agent.
+
+48. Generate a unique, non-sensitive test message at runtime.
+
+49. Send the runtime-generated message from the LivePerson agent workspace.
+
+50. Validate that the same runtime-generated message appears in the customer chat.
+
+51. Send a different unique, non-sensitive customer message from the Olive customer chat.
+
+52. Validate that the customer message appears in the LivePerson agent workspace.
+
+53. Capture screenshot evidence from both the customer and agent sides where permitted.
+
+54. End or close the test interaction only when doing so is supported and safe in UAT.
+
+VIDEO_AND_EVIDENCE:
+- Record the complete browser execution when video recording is enabled.
+- Include the recording in the shareable report.
+- Include screenshots for each major branch.
+- Include the runtime action sequence and semantic validation results.
+- Redact credentials, authentication tokens and sensitive customer information.
+- Do not expose order references unnecessarily in the report summary.
+
+EXPECTED_RESULTS:
+- Deterministic login completes successfully.
+- The authenticated session is reused by the scenario.
+- Olive starts with a clean conversation.
+- Recent orders are discovered dynamically.
+- At least one recent-order reorder journey completes successfully.
+- A runtime-discovered order can be selected through the UI.
+- A runtime-discovered order can be entered manually when required.
+- Add to cart is available and actionable for eligible orders.
+- The cancelled-order negative branch behaves correctly.
+- The cancelled-order affirmative branch behaves correctly.
+- Help with something else returns to a suitable assistance state.
+- A real agent-handover state is observed.
+- Agent-to-customer and customer-to-agent messages are delivered.
+- Screenshots, logs, semantic validations and video evidence are available in the report.
+
+FAILURE_CONDITIONS:
+- Authenticated storage state is unavailable.
+- The user is unexpectedly logged out.
+- Olive cannot be opened or reset.
+- No suitable recent-order test data is available.
+- A runtime-discovered order cannot be selected or entered.
+- A required response control is missing.
+- Add to cart is unavailable for an otherwise eligible order.
+- Olive returns an unrelated response or unrecoverable application error.
+- The cancelled-order branch cannot be reached with available test data.
+- The conversation becomes stuck.
+- Agent handover is reported as successful without observing a handover state.
+- A LivePerson message is not delivered in either direction.
+- Sensitive data is exposed in logs, prompts or reports.
+
+MAX_CUSTOMER_TURNS: 25
+
+MIN_MEANINGFUL_RESPONSES: 12

@@ -362,25 +362,16 @@ async function callMcpDirect(
       process.env.MCP_DETERMINISTIC_AUTH || ''
     ).toLowerCase() === 'true';
 
-  const oliveLongRunningTool =
-    name === 'pw_send_olive_message' ||
-    name === 'pw_click_button';
-
   const timeoutMs =
     authenticatedNavigation
       ? Number(
           process.env.MCP_AUTH_TOOL_TIMEOUT_MS ||
           180000
         )
-      : oliveLongRunningTool
-        ? Number(
-            process.env.MCP_OLIVE_TOOL_TIMEOUT_MS ||
-            120000
-          )
-        : Number(
-            process.env.MCP_TOOL_TIMEOUT_MS ||
-            60000
-          );
+      : Number(
+          process.env.MCP_TOOL_TIMEOUT_MS ||
+          60000
+        );
 
   console.log(
     `⏱️ MCP timeout for ${name}: ${timeoutMs}ms`
@@ -667,18 +658,6 @@ function resolveRuntimeControlText(
     return '';
   }
 
-  /*
-   * Named runtime placeholders are intentionally resolved inside
-   * Playwright, where the real customer value remains private.
-   */
-  if (
-    /\[(?:PRIMARY|SECONDARY)_RUNTIME_ORDER_NUMBER\]/i.test(
-      requested
-    )
-  ) {
-    return requested;
-  }
-
   const candidates = [];
 
   if (
@@ -923,10 +902,18 @@ async function executeChatDeltaFlow({
             runtimeTurn
           );
 
-        /*
-         * pw_click_button returns the Olive response delta.
-         * Do not read the complete transcript after the click.
-         */
+        if (!result.failed) {
+          runtimeTurn += 1;
+
+          result =
+            await callMcpDirect(
+              mcpClient,
+              metrics,
+              'pw_read_olive_conversation',
+              {},
+              runtimeTurn
+            );
+        }
       } else if (
         decision.action ===
         'TAKE_SCREENSHOT'

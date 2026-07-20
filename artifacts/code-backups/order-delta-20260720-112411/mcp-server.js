@@ -1513,33 +1513,8 @@ ${exploration.screenshots.join('\n')}
             String(result.userMessage || args.text)
               .slice(0, 1000),
 
-          newBotMessages:
-            Array.isArray(result.newBotMessages)
-              ? result.newBotMessages
-                  .map(message =>
-                    String(message || '')
-                      .replace(/^text:\s*/i, '')
-                      .trim()
-                  )
-                  .filter(Boolean)
-                  .slice(0, 20)
-              : [],
-
           botResponse:
-            String(
-              Array.isArray(result.newBotMessages) &&
-              result.newBotMessages.length
-                ? result.newBotMessages
-                    .map(message =>
-                      String(message || '')
-                        .replace(/^text:\s*/i, '')
-                        .trim()
-                    )
-                    .filter(Boolean)
-                    .join('\n')
-                : result.botResponse || ''
-            )
-              .replace(/^text:\s*/i, '')
+            String(result.botResponse || '')
               .slice(
                 0,
                 Number(
@@ -1556,12 +1531,7 @@ ${exploration.screenshots.join('\n')}
 
           newBotMessageCount:
             Number(
-              result.newBotMessageCount ||
-              (
-                Array.isArray(result.newBotMessages)
-                  ? result.newBotMessages.length
-                  : 0
-              )
+              result.newBotMessageCount || 0
             ),
 
           screenshotCaptured:
@@ -1585,137 +1555,18 @@ ${exploration.screenshots.join('\n')}
       }
 
       case 'pw_click_button': {
-        const targetText =
-          String(args.targetText || '')
-            .trim();
+        const locator = activePage.getByRole('button', { name: new RegExp(args.targetText, 'i') }).first();
 
-        let clickedInOlive = false;
-        let oliveClickResult = null;
-
-        if (olive) {
-          try {
-            oliveClickResult =
-              await olive.clickControl(
-                targetText
-              );
-
-            clickedInOlive = true;
-          } catch (error) {
-            console.error(
-              `[MCP click] Olive control lookup did not match: ${error.message}`
-            );
-          }
-        }
-
-        if (!clickedInOlive) {
-          const pageButton =
-            activePage
-              .getByRole(
-                'button',
-                {
-                  name: targetText,
-                  exact: true,
-                }
-              )
-              .first();
-
-          if (
-            await pageButton
-              .isVisible({
-                timeout: 3000,
-              })
-              .catch(() => false)
-          ) {
-            await pageButton.click();
-          } else {
-            await activePage
-              .getByText(
-                targetText,
-                {
-                  exact: true,
-                }
-              )
-              .first()
-              .click({
-                timeout: 10000,
-              });
-          }
-        }
-
-        /*
-         * Do not wait for page network stability after an Olive
-         * chat control. The widget updates asynchronously inside
-         * its frame and may not trigger page navigation.
-         */
-        if (!clickedInOlive) {
-          await waitForStablePage(
-            activePage
-          );
+        if (await locator.isVisible({ timeout: 5000 }).catch(() => false)) {
+          await locator.click();
         } else {
-          await activePage.waitForTimeout(
-            500
-          );
+          await activePage.locator(`text=${args.targetText}`).first().click({ timeout: 10000 });
         }
 
-        const clickResult =
-          clickedInOlive
-            ? {
-                clicked: true,
-                targetText,
-                location: 'olive',
-                newBotMessages:
-                  Array.isArray(
-                    oliveClickResult
-                      ?.newBotMessages
-                  )
-                    ? oliveClickResult
-                        .newBotMessages
-                        .map(message =>
-                          String(message || '')
-                            .replace(
-                              /^text:\s*/i,
-                              ''
-                            )
-                            .trim()
-                        )
-                        .filter(Boolean)
-                    : [],
-                botResponse:
-                  String(
-                    oliveClickResult
-                      ?.botResponse ||
-                    ''
-                  )
-                    .replace(
-                      /^text:\s*/i,
-                      ''
-                    )
-                    .trim(),
-                conversationState:
-                  oliveClickResult
-                    ?.conversationState ||
-                  'UNKNOWN',
-                newBotMessageCount:
-                  Number(
-                    oliveClickResult
-                      ?.newBotMessageCount ||
-                    0
-                  ),
-              }
-            : {
-                clicked: true,
-                targetText,
-                location: 'page',
-              };
+        await waitForStablePage(activePage);
 
         return {
-          content: [{
-            type: 'text',
-            text:
-              JSON.stringify(
-                clickResult
-              ),
-          }],
+          content: [{ type: 'text', text: `Clicked element matching ${args.targetText}` }],
         };
       }
 
