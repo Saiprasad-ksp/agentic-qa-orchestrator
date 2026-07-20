@@ -695,24 +695,40 @@ jobs:
 
           npx playwright test "$QA_SPEC_PATH" --workers=1
 
-      - name: Build shareable report when missing
+      - name: Build current scenario report
         if: ${{ always() && inputs.run_mode == 'scenario' }}
+        env:
+          WORKFLOW_JOB_STATUS: ${{ job.status }}
+          GITHUB_EXECUTION_RUN_ID: ${{ github.run_id }}
         run: |
           set +e
 
           REPORT_NAME="${QA_SCENARIO_NAME}-report"
           REPORT_PATH="reports/shareable/${REPORT_NAME}.html"
 
-          if [[ -f "$REPORT_PATH" ]]; then
-            echo "Shareable report already exists: $REPORT_PATH"
-            exit 0
-          fi
+          echo "Building report for scenario: $QA_SCENARIO_NAME"
+          echo "GitHub run ID: $GITHUB_EXECUTION_RUN_ID"
+          echo "Job status: $WORKFLOW_JOB_STATUS"
+
+          # Never reuse a report from an earlier scenario execution.
+          rm -f "$REPORT_PATH"
+          rm -f "reports/${QA_SCENARIO_NAME}.report.html"
+          rm -f "reports/${QA_SCENARIO_NAME}.metrics.json"
+          rm -f "reports/transcripts/${QA_SCENARIO_NAME}.transcript.json"
 
           QA_SCENARIO_NAME="$QA_SCENARIO_NAME" \
           QA_SCENARIO_TYPE="${QA_SCENARIO_TYPE:-deterministic}" \
-          QA_LIFECYCLE_STATUS="${QA_LIFECYCLE_STATUS:-UNKNOWN}" \
+          QA_LIFECYCLE_STATUS="$WORKFLOW_JOB_STATUS" \
+          QA_GITHUB_RUN_ID="$GITHUB_EXECUTION_RUN_ID" \
           TARGET_ENV="$TARGET_ENV" \
           node scripts/build-shareable-report.js "$REPORT_NAME"
+
+          if [[ ! -f "$REPORT_PATH" ]]; then
+            echo "::error::Current scenario report was not created: $REPORT_PATH"
+            exit 1
+          fi
+
+          echo "Current scenario report created: $REPORT_PATH"
 
       - name: List generated evidence
         if: ${{ always() }}
