@@ -12,7 +12,11 @@ module.exports = defineConfig({
     headless: process.env.HEADLESS !== 'false',
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
-    video: 'retain-on-failure',
+    use: {
+    video: process.env.PLAYWRIGHT_VIDEO || 'on',
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
+}
   },
   projects: [
     {
